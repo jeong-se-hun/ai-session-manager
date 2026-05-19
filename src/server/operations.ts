@@ -3,21 +3,9 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { getAppDb } from "./appDb";
 import type { TrashRecord } from "./appDb";
+import { getStoragePaths } from "./config";
 import { listSessions, openStateDb } from "./scanner";
-import {
-  backupRoot,
-  claudeHome,
-  claudeProjectsRoot,
-  codexHome,
-  geminiTmpRoot,
-  historyPath,
-  isInside,
-  logsDbPath,
-  sessionIndexPath,
-  sessionsRoot,
-  stateDbPath,
-  trashRoot
-} from "./paths";
+import { isInside } from "./paths";
 import type { SessionSource, TrashResult } from "../shared/types";
 
 const RECENT_GUARD_MS = 30 * 60 * 1000;
@@ -48,6 +36,7 @@ export async function trashSessions(sessionIds: string[]): Promise<TrashResult[]
     }
 
     const deletedAt = new Date().toISOString();
+    const { trashRoot } = getStoragePaths();
     const trashDir = path.join(trashRoot, `${deletedAt.replace(/[:.]/g, "-")}-${safeFileName(sessionId)}`);
     const manifestPath = path.join(trashDir, "manifest.json");
     fs.mkdirSync(trashDir, { recursive: true });
@@ -111,11 +100,12 @@ export async function setArchived(sessionIds: string[], archived: boolean): Prom
 }
 
 export async function permanentlyDeleteSessions(sessionIds: string[]): Promise<TrashResult[]> {
+  const paths = getStoragePaths();
   const list = await listSessions({ archive: "all", trash: "all", source: "all", limit: 100000 });
   const byId = new Map(list.sessions.map((session) => [session.id, session]));
   const hasCodexTarget = sessionIds.some((id) => byId.get(id)?.source === "codex" || (!byId.has(id) && inferSourceFromSessionId(id) === "codex"));
   const stateDb = hasCodexTarget ? openStateDb(false) : null;
-  const logsDb = hasCodexTarget && fs.existsSync(logsDbPath) ? new Database(logsDbPath) : null;
+  const logsDb = hasCodexTarget && fs.existsSync(paths.logsDbPath) ? new Database(paths.logsDbPath) : null;
   const appDb = getAppDb();
   const trashStmt = appDb.prepare("SELECT * FROM trash_items WHERE session_id = ?");
 
@@ -140,8 +130,8 @@ export async function permanentlyDeleteSessions(sessionIds: string[]): Promise<T
           prepareSqliteForHardDelete(logsDb);
           logsDb.prepare("DELETE FROM logs WHERE thread_id = ?").run(sessionId);
         }
-        rewriteJsonlWithoutSession(historyPath, "session_id", sessionId);
-        rewriteJsonlWithoutSession(sessionIndexPath, "id", sessionId);
+        rewriteJsonlWithoutSession(paths.historyPath, "session_id", sessionId);
+        rewriteJsonlWithoutSession(paths.sessionIndexPath, "id", sessionId);
         scrubSessionFromBackups(sessionId);
       }
 
@@ -163,6 +153,7 @@ export async function permanentlyDeleteSessions(sessionIds: string[]): Promise<T
 }
 
 function getSourceFileRoot(source: SessionSource): string {
+  const { claudeHome, geminiTmpRoot, sessionsRoot } = getStoragePaths();
   if (source === "claude") return claudeHome;
   if (source === "gemini") return geminiTmpRoot;
   return sessionsRoot;
@@ -179,6 +170,7 @@ function safeFileName(value: string): string {
 }
 
 function getRelatedSessionPaths(source: SessionSource, rolloutPath: string): string[] {
+  const { claudeHome, claudeProjectsRoot } = getStoragePaths();
   if (source !== "claude" || !rolloutPath) return [];
   if (!isInside(claudeProjectsRoot, rolloutPath)) return [];
   if (path.dirname(path.dirname(rolloutPath)) !== claudeProjectsRoot) return [];
@@ -195,6 +187,7 @@ function copyRelatedSessionPaths(source: SessionSource, rolloutPath: string, tra
 }
 
 function deleteAppState(appDb: Database.Database, sessionId: string, trashRecord: TrashRecord | undefined): void {
+  const { trashRoot } = getStoragePaths();
   if (trashRecord?.trash_dir && isInside(trashRoot, trashRecord.trash_dir) && fs.existsSync(trashRecord.trash_dir)) {
     fs.rmSync(trashRecord.trash_dir, { recursive: true, force: true });
   }
@@ -209,6 +202,7 @@ function deleteAppState(appDb: Database.Database, sessionId: string, trashRecord
 }
 
 function scrubSessionFromBackups(sessionId: string): void {
+  const { backupRoot, historyPath, logsDbPath, sessionIndexPath, stateDbPath } = getStoragePaths();
   if (!fs.existsSync(backupRoot)) return;
   for (const entry of fs.readdirSync(backupRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
@@ -286,6 +280,7 @@ function tableExists(db: Database.Database, name: string): boolean {
 }
 
 function createBackup(reason: string): void {
+  const { backupRoot, codexHome, historyPath, logsDbPath, sessionIndexPath, stateDbPath } = getStoragePaths();
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const dir = path.join(backupRoot, `${stamp}-${reason}`);
   fs.mkdirSync(dir, { recursive: true });

@@ -11,6 +11,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Settings,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -18,11 +19,14 @@ import {
 } from "lucide-react";
 import type {
   ArchiveFilter,
+  BrowseDirectoryResponse,
   DetailItem,
   SessionDetailResponse,
   SessionListResponse,
   SessionSummaryRow,
   SessionSource,
+  SetupPathCandidate,
+  SetupStateResponse,
   SourceFilter,
   SortKey,
   TrashFilter
@@ -60,6 +64,22 @@ const api = {
       })
     );
   },
+  async setup(): Promise<SetupStateResponse> {
+    return readResponse(await fetch("/api/setup"));
+  },
+  async browseDirectory(source: SessionSource, pathValue: string): Promise<BrowseDirectoryResponse> {
+    const params = new URLSearchParams({ source, path: pathValue });
+    return readResponse(await fetch(`/api/setup/browse?${params.toString()}`));
+  },
+  async saveSetup(body: SetupDraft): Promise<SetupStateResponse> {
+    return readResponse(
+      await fetch("/api/setup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, completed: true })
+      })
+    );
+  },
   async post(path: string, body: unknown): Promise<{ results: Array<{ sessionId: string; status: string; reason?: string }> }> {
     return readResponse(
       await fetch(path, {
@@ -90,6 +110,7 @@ interface OperationState {
 }
 
 type ProgressHandler = (done: number) => void;
+type SetupDraft = Record<`${SessionSource}Home`, string>;
 
 const defaultFilters: FilterState = {
   search: "",
@@ -144,6 +165,11 @@ function App() {
   const [operation, setOperation] = useState<OperationState | null>(null);
   const [summarizingSessionId, setSummarizingSessionId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string>("");
+  const [setup, setSetup] = useState<SetupStateResponse | null>(null);
+  const [setupDraft, setSetupDraft] = useState<SetupDraft>({ codexHome: "", claudeHome: "", geminiHome: "" });
+  const [showSetup, setShowSetup] = useState(false);
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [pickerSource, setPickerSource] = useState<SessionSource | null>(null);
   const refreshSeq = useRef(0);
   const didInitialRefresh = useRef(false);
   const busy = operation?.label ?? null;
@@ -180,6 +206,39 @@ function App() {
     setFilters(nextFilters);
     await refresh(nextFilters);
   }
+
+  async function saveSetup(nextDraft = setupDraft) {
+    setSetupBusy(true);
+    try {
+      const response = await api.saveSetup(nextDraft);
+      setSetup(response);
+      setSetupDraft(getDraftFromSetup(response));
+      setShowSetup(false);
+      setSelected(new Set());
+      setActiveId(null);
+      setDetail(null);
+      setDetailError("");
+      const nextFilters = { ...filters, cwd: "" };
+      setFilters(nextFilters);
+      await refresh(nextFilters);
+      setNotice("기록 경로를 저장하고 다시 스캔했습니다.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "기록 경로 저장에 실패했습니다.");
+    } finally {
+      setSetupBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    api
+      .setup()
+      .then((response) => {
+        setSetup(response);
+        setSetupDraft(getDraftFromSetup(response));
+        if (!response.completed) setShowSetup(true);
+      })
+      .catch((error) => setNotice(error instanceof Error ? error.message : "기록 경로 설정을 불러오지 못했습니다."));
+  }, []);
 
   useEffect(() => {
     if (!didInitialRefresh.current) {
@@ -266,6 +325,30 @@ function App() {
 
   return (
     <main className="app-shell" aria-busy={Boolean(operation)}>
+      {setup && (showSetup || !setup.completed) && (
+        <SetupPanel
+          setup={setup}
+          draft={setupDraft}
+          busy={setupBusy}
+          onDraftChange={setSetupDraft}
+          onBrowse={(source) => setPickerSource(source)}
+          onUseRecommended={() => void saveSetup(getRecommendedDraft(setup, setupDraft))}
+          onSave={() => void saveSetup()}
+          onClose={() => setShowSetup(false)}
+        />
+      )}
+      {pickerSource && (
+        <FolderPicker
+          source={pickerSource}
+          initialPath={setupDraft[getHomeKey(pickerSource)]}
+          onPick={(pathValue) => {
+            setSetupDraft({ ...setupDraft, [getHomeKey(pickerSource)]: pathValue });
+            setPickerSource(null);
+          }}
+          onClose={() => setPickerSource(null)}
+        />
+      )}
+
       <section className="command-panel" aria-label="세션 검색과 보기 전환">
         <section className="platform-panel" aria-label="도구 선택">
           <div className="source-tabs" role="tablist" aria-label="AI 도구 선택">
@@ -370,6 +453,11 @@ function App() {
           <button className="primary-button refresh-button" onClick={() => void refreshAll()} disabled={loading} aria-label="세션 목록 새로고침">
             <RefreshCw className={loading ? "loading-icon" : ""} size={18} /> 새로고침
           </button>
+          {setup?.completed && (
+            <button className="icon-text-button" onClick={() => setShowSetup(true)} aria-label="기록 경로 설정 열기">
+              <Settings size={17} /> 경로 설정
+            </button>
+          )}
         </div>
 
         <div className="delete-help">
@@ -555,6 +643,256 @@ async function postSessionIds(path: string, sessionIds: string[], onProgress?: P
     onProgress?.(Math.min(index + chunk.length, sessionIds.length));
   }
   return { results };
+}
+
+function SetupPanel({
+  setup,
+  draft,
+  busy,
+  onDraftChange,
+  onBrowse,
+  onUseRecommended,
+  onSave,
+  onClose
+}: {
+  setup: SetupStateResponse;
+  draft: SetupDraft;
+  busy: boolean;
+  onDraftChange: (draft: SetupDraft) => void;
+  onBrowse: (source: SessionSource) => void;
+  onUseRecommended: () => void;
+  onSave: () => void;
+  onClose: () => void;
+}) {
+  const platformLabel = `${setup.platform}${setup.isWsl ? " / WSL" : ""}`;
+  const readyCount = sourceOptions
+    .filter((option) => option.value !== "all")
+    .filter((option) => setup.sources[option.value as SessionSource].candidates.some((candidate) => candidate.status === "ready")).length;
+
+  return (
+    <section className="setup-panel" aria-label="첫 실행 기록 경로 설정">
+      <div className="setup-heading">
+        <div>
+          <strong>기록 경로 설정</strong>
+          <span>
+            {platformLabel} 환경에서 AI 기록 폴더를 찾았습니다. 자동 추천을 저장하거나 경로를 직접 입력한 뒤 다시 스캔하세요.
+          </span>
+        </div>
+        <div className="setup-actions">
+          <button onClick={onUseRecommended} disabled={busy || readyCount === 0}>
+            <RefreshCw className={busy ? "loading-icon" : ""} size={16} /> 추천 경로 저장
+          </button>
+          <button className="primary-button" onClick={onSave} disabled={busy}>
+            {busy ? <RefreshCw className="loading-icon" size={16} /> : <Settings size={16} />} 저장 후 스캔
+          </button>
+          {setup.completed && (
+            <button className="icon-button" onClick={onClose} disabled={busy} aria-label="경로 설정 닫기">
+              <X size={17} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="setup-grid">
+        {(["codex", "claude", "gemini"] as SessionSource[]).map((source) => {
+          const sourceInfo = setup.sources[source];
+          const homeKey = getHomeKey(source);
+          return (
+            <section className={`setup-source ${source}`} key={source}>
+              <div className="setup-source-title">
+                <SourceBadge source={source} />
+                <strong>{sourceLabel[source]} 기록 위치</strong>
+              </div>
+              <label className="path-input-label">
+                <span>{getFolderHint(source)}</span>
+                <span className="path-edit-row">
+                  <input
+                    value={draft[homeKey]}
+                    onChange={(event) => onDraftChange({ ...draft, [homeKey]: event.target.value })}
+                    placeholder={sourceInfo.defaultPath}
+                    aria-label={`${sourceLabel[source]} 기록 경로`}
+                  />
+                  <button type="button" onClick={() => onBrowse(source)} aria-label={`${sourceLabel[source]} 폴더 선택`}>
+                    <FolderOpen size={16} /> 선택
+                  </button>
+                </span>
+              </label>
+              <div className="candidate-list">
+                {sourceInfo.candidates.map((candidate) => (
+                  <CandidateButton
+                    key={`${source}:${candidate.path}`}
+                    candidate={candidate}
+                    active={candidate.path === draft[homeKey]}
+                    onClick={() => onDraftChange({ ...draft, [homeKey]: candidate.path })}
+                  />
+                ))}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function CandidateButton({
+  candidate,
+  active,
+  onClick
+}: {
+  candidate: SetupPathCandidate;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button className={`candidate-button ${candidate.status} ${active ? "selected" : ""}`} onClick={onClick}>
+      <span className="candidate-status">{getCandidateStatusLabel(candidate)}</span>
+      <span className="candidate-path">{candidate.path}</span>
+      <small>{candidate.signals.length > 0 ? candidate.signals.join(" · ") : candidate.reason}</small>
+    </button>
+  );
+}
+
+function getDraftFromSetup(setup: SetupStateResponse): SetupDraft {
+  return {
+    codexHome: setup.sources.codex.currentPath,
+    claudeHome: setup.sources.claude.currentPath,
+    geminiHome: setup.sources.gemini.currentPath
+  };
+}
+
+function getRecommendedDraft(setup: SetupStateResponse, fallback: SetupDraft): SetupDraft {
+  const next = { ...fallback };
+  for (const source of ["codex", "claude", "gemini"] as SessionSource[]) {
+    const recommended = setup.sources[source].candidates.find((candidate) => candidate.recommended);
+    if (recommended) next[getHomeKey(source)] = recommended.path;
+  }
+  return next;
+}
+
+function getHomeKey(source: SessionSource): keyof SetupDraft {
+  return `${source}Home` as keyof SetupDraft;
+}
+
+function getFolderHint(source: SessionSource): string {
+  if (source === "codex") return "state_5.sqlite 또는 sessions 폴더가 있는 폴더";
+  if (source === "claude") return "projects 또는 transcripts 폴더가 있는 폴더";
+  return "tmp 또는 history 폴더가 있는 폴더";
+}
+
+function getCandidateStatusLabel(candidate: SetupPathCandidate): string {
+  const prefix = candidate.recommended ? "추천" : candidate.label;
+  if (candidate.status === "ready") return `${prefix} · ${candidate.sessionCount.toLocaleString("ko-KR")}개`;
+  if (candidate.status === "partial") return `${prefix} · 구조 확인`;
+  return `${prefix} · 없음`;
+}
+
+function FolderPicker({
+  source,
+  initialPath,
+  onPick,
+  onClose
+}: {
+  source: SessionSource;
+  initialPath: string;
+  onPick: (pathValue: string) => void;
+  onClose: () => void;
+}) {
+  const [pathValue, setPathValue] = useState(initialPath);
+  const [browse, setBrowse] = useState<BrowseDirectoryResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function load(nextPath = pathValue) {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await api.browseDirectory(source, nextPath);
+      setBrowse(response);
+      setPathValue(response.currentPath);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "폴더를 읽지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load(initialPath);
+  }, [source, initialPath]);
+
+  const candidate = browse?.candidate;
+  const sourceName = sourceLabel[source];
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={`${sourceName} 기록 폴더 선택`}>
+      <section className={`folder-picker ${source}`}>
+        <div className="folder-picker-head">
+          <div>
+            <span className="folder-picker-kicker">
+              <SourceBadge source={source} />
+              <span>로컬 기록 위치</span>
+            </span>
+            <strong>{sourceName} 기록 폴더 선택</strong>
+            <span>{getFolderHint(source)}를 선택하세요.</span>
+          </div>
+          <button className="icon-button" onClick={onClose} aria-label="폴더 선택 닫기">
+            <X size={17} />
+          </button>
+        </div>
+
+        <div className="folder-path-row">
+          <input
+            value={pathValue}
+            onChange={(event) => setPathValue(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void load(pathValue);
+            }}
+            aria-label={`${sourceName} 폴더 경로`}
+          />
+          <button onClick={() => void load(pathValue)} disabled={loading}>
+            <RefreshCw className={loading ? "loading-icon" : ""} size={16} /> 열기
+          </button>
+        </div>
+
+        {candidate && (
+          <div className={`folder-current ${candidate.status}`}>
+            <strong>{getCandidateStatusLabel(candidate)}</strong>
+            <span>{candidate.signals.length > 0 ? candidate.signals.join(" · ") : candidate.reason}</span>
+          </div>
+        )}
+        {error && <p className="folder-error">{error}</p>}
+
+        <div className="folder-list" aria-label="하위 폴더 목록">
+          {loading && (
+            <div className="folder-loading">
+              <RefreshCw className="loading-icon" size={16} /> 폴더를 읽고 있습니다.
+            </div>
+          )}
+          {browse?.parentPath && (
+            <button className="folder-row parent" onClick={() => void load(browse.parentPath || pathValue)} aria-label="상위 폴더 열기">
+              <span>..</span>
+              <small>상위 폴더</small>
+            </button>
+          )}
+          {(browse?.entries ?? []).map((entry) => (
+            <button className="folder-row" key={entry.path} onClick={() => void load(entry.path)} aria-label={`${entry.name} 폴더 열기`}>
+              <span>{entry.name}</span>
+              <small>{entry.hidden ? "숨김 폴더" : entry.path}</small>
+            </button>
+          ))}
+          {browse && browse.entries.length === 0 && <p className="folder-empty">표시할 하위 폴더가 없습니다.</p>}
+        </div>
+
+        <div className="folder-picker-actions">
+          <button onClick={onClose}>취소</button>
+          <button className="primary-button" onClick={() => onPick(browse?.currentPath || pathValue)}>
+            이 폴더 선택
+          </button>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function OperationBanner({ operation }: { operation: OperationState }) {

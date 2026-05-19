@@ -2,21 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { getSummaryMap, getTrashMap } from "./appDb";
+import { getStoragePaths } from "./config";
 import { readJsonl, truncateText } from "./jsonl";
-import {
-  appHome,
-  claudeHome,
-  claudeProjectsRoot,
-  claudeTranscriptsRoot,
-  codexHome,
-  geminiHistoryRoot,
-  geminiHome,
-  geminiTmpRoot,
-  historyPath,
-  sessionsRoot,
-  stateDbPath,
-  toIsoFromSeconds
-} from "./paths";
+import { toIsoFromSeconds } from "./paths";
 import type {
   DetailItem,
   SessionDetailResponse,
@@ -55,6 +43,7 @@ const SOURCE_LABELS: Record<SessionSource, string> = {
 };
 
 export function openStateDb(readonly = true): Database.Database {
+  const { stateDbPath } = getStoragePaths();
   if (!fs.existsSync(stateDbPath)) {
     throw new Error(`Codex 목록 저장소 파일을 찾지 못했습니다: ${stateDbPath}`);
   }
@@ -62,6 +51,7 @@ export function openStateDb(readonly = true): Database.Database {
 }
 
 export function listThreadRows(): ThreadRow[] {
+  const { stateDbPath } = getStoragePaths();
   if (!fs.existsSync(stateDbPath)) return [];
   const db = openStateDb(true);
   try {
@@ -84,6 +74,7 @@ export function listThreadRows(): ThreadRow[] {
 }
 
 export async function buildHistoryMap(): Promise<Map<string, string>> {
+  const { historyPath } = getStoragePaths();
   const history = new Map<string, string>();
   await readJsonl<AnyPayload>(historyPath, ({ value }) => {
     const sessionId = typeof value.session_id === "string" ? value.session_id : "";
@@ -99,6 +90,7 @@ function toIsoFromMillis(value: number | null | undefined): string | null {
 }
 
 export async function listSessions(filters: SessionFilters = {}): Promise<SessionListResponse> {
+  const paths = getStoragePaths();
   const history = await buildHistoryMap();
   const summaries = getSummaryMap();
   const trash = getTrashMap();
@@ -123,10 +115,10 @@ export async function listSessions(filters: SessionFilters = {}): Promise<Sessio
       missingFiles: allSessions.filter((session) => !session.fileExists).length,
       totalBytes: allSessions.reduce((sum, session) => sum + session.fileSize, 0),
       sources: buildSourceTotals(allSessions, filtered),
-      codexHome,
-      claudeHome,
-      geminiHome,
-      appHome
+      codexHome: paths.codexHome,
+      claudeHome: paths.claudeHome,
+      geminiHome: paths.geminiHome,
+      appHome: paths.appHome
     },
     projects: buildProjectOptions(allSessions, filters)
   };
@@ -223,6 +215,7 @@ async function listClaudeSessions(
   summaries: Map<string, string>,
   trash: Map<string, { deleted_at: string }>
 ): Promise<SessionSummaryRow[]> {
+  const { claudeProjectsRoot, claudeTranscriptsRoot } = getStoragePaths();
   const files = [
     ...collectFiles(claudeTranscriptsRoot, (filePath, entry) => entry.isFile() && filePath.endsWith(".jsonl")),
     ...collectFiles(
@@ -272,6 +265,7 @@ function listGeminiSessions(
   summaries: Map<string, string>,
   trash: Map<string, { deleted_at: string }>
 ): SessionSummaryRow[] {
+  const { geminiTmpRoot } = getStoragePaths();
   const files = collectFiles(
     geminiTmpRoot,
     (filePath, entry) => entry.isFile() && path.basename(path.dirname(filePath)) === "chats" && filePath.endsWith(".json")
@@ -706,6 +700,7 @@ function readGeminiSessionMeta(
 }
 
 function readGeminiProjectRoots(): Map<string, string> {
+  const { geminiHistoryRoot } = getStoragePaths();
   const result = new Map<string, string>();
   if (!fs.existsSync(geminiHistoryRoot)) return result;
   for (const entry of safeReadDir(geminiHistoryRoot)) {
@@ -786,6 +781,7 @@ function collectFiles(root: string, predicate: (filePath: string, entry: fs.Dire
 }
 
 function collectCodexRolloutFiles(): string[] {
+  const { sessionsRoot } = getStoragePaths();
   return collectFiles(sessionsRoot, (filePath, entry) => {
     return entry.isFile() && path.basename(filePath).startsWith("rollout-") && filePath.endsWith(".jsonl");
   });
@@ -808,17 +804,20 @@ function getClaudeRelatedSize(filePath: string): number {
 }
 
 function getClaudeRelatedDir(filePath: string): string | null {
+  const { claudeProjectsRoot } = getStoragePaths();
   if (!isInsidePath(claudeProjectsRoot, filePath)) return null;
   if (path.dirname(path.dirname(filePath)) !== claudeProjectsRoot) return null;
   return path.join(path.dirname(filePath), path.basename(filePath, ".jsonl"));
 }
 
 function getGeminiProjectKey(filePath: string): string {
+  const { geminiTmpRoot } = getStoragePaths();
   const relative = path.relative(geminiTmpRoot, filePath);
   return relative.split(path.sep)[0] || "unknown";
 }
 
 function getGeminiFileKey(filePath: string): string {
+  const { geminiTmpRoot } = getStoragePaths();
   const withoutExtension = path.relative(geminiTmpRoot, filePath).replace(/\.json$/, "");
   return withoutExtension
     .split(path.sep)
@@ -827,6 +826,7 @@ function getGeminiFileKey(filePath: string): string {
 }
 
 function getClaudeSessionId(filePath: string): string {
+  const { claudeProjectsRoot, claudeTranscriptsRoot } = getStoragePaths();
   if (isInsidePath(claudeTranscriptsRoot, filePath)) return `claude:${path.basename(filePath, ".jsonl")}`;
   const relative = path.relative(claudeProjectsRoot, filePath).replace(/\.jsonl$/, "");
   return `claude:project:${relative
@@ -842,6 +842,7 @@ function getCodexSessionIdFromPath(filePath: string): string {
 }
 
 function inferClaudeProjectPath(filePath: string): string {
+  const { claudeProjectsRoot, claudeTranscriptsRoot } = getStoragePaths();
   if (isInsidePath(claudeTranscriptsRoot, filePath)) return claudeTranscriptsRoot;
   const projectSlug = path.relative(claudeProjectsRoot, filePath).split(path.sep)[0];
   if (!projectSlug) return claudeProjectsRoot;

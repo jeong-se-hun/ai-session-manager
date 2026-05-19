@@ -15,6 +15,58 @@ export type SessionSource = "codex" | "claude" | "gemini";
 
 export type SourceFilter = "all" | SessionSource;
 
+export type SetupCandidateStatus = "ready" | "partial" | "missing";
+
+export interface SourcePathInfo {
+  source: SessionSource;
+  label: string;
+  currentPath: string;
+  envPath: string | null;
+  defaultPath: string;
+  candidates: SetupPathCandidate[];
+}
+
+export interface SetupPathCandidate {
+  path: string;
+  source: SessionSource;
+  label: string;
+  status: SetupCandidateStatus;
+  exists: boolean;
+  sessionCount: number;
+  signals: string[];
+  reason: string;
+  recommended: boolean;
+}
+
+export interface SetupStateResponse {
+  completed: boolean;
+  platform: NodeJS.Platform;
+  isWsl: boolean;
+  homeDir: string;
+  sources: Record<SessionSource, SourcePathInfo>;
+}
+
+export interface SetupSaveRequest {
+  codexHome: string;
+  claudeHome: string;
+  geminiHome: string;
+  completed?: boolean;
+}
+
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+  hidden: boolean;
+}
+
+export interface BrowseDirectoryResponse {
+  source: SessionSource;
+  currentPath: string;
+  parentPath: string | null;
+  entries: DirectoryEntry[];
+  candidate: SetupPathCandidate;
+}
+
 export interface SessionFilters {
   search?: string;
   source?: SourceFilter;

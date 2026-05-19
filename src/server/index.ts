@@ -4,8 +4,9 @@ import { z } from "zod";
 import { runDoctor } from "./doctor";
 import { permanentlyDeleteSessions, restoreSessions, setArchived, trashSessions } from "./operations";
 import { getSessionDetail, listSessions } from "./scanner";
+import { browseSetupDirectory, getSetupState, saveSetupState } from "./setup";
 import { generateSessionSummary } from "./summary";
-import type { ArchiveFilter, SortKey, SourceFilter, TrashFilter } from "../shared/types";
+import type { ArchiveFilter, SetupSaveRequest, SortKey, SourceFilter, TrashFilter } from "../shared/types";
 
 const server = Fastify({ logger: true });
 const port = Number(process.env.PORT ?? 3766);
@@ -31,12 +32,34 @@ const idQuerySchema = z.object({
 const summaryBodySchema = z.object({
   sessionId: z.string().min(1)
 });
+const setupBodySchema = z.object({
+  codexHome: z.string().min(1),
+  claudeHome: z.string().min(1),
+  geminiHome: z.string().min(1),
+  completed: z.boolean().optional()
+});
+const browseQuerySchema = z.object({
+  source: z.enum(["codex", "claude", "gemini"]),
+  path: z.string().optional()
+});
 
 await server.register(cors, {
   origin: ["http://127.0.0.1:3767", "http://localhost:3767"]
 });
 
 server.get("/api/health", async () => ({ ok: true, checkedAt: new Date().toISOString() }));
+
+server.get("/api/setup", async () => getSetupState());
+
+server.get("/api/setup/browse", async (request) => {
+  const query = browseQuerySchema.parse(request.query);
+  return browseSetupDirectory(query.source, query.path);
+});
+
+server.post("/api/setup", async (request) => {
+  const body = setupBodySchema.parse(request.body) as SetupSaveRequest;
+  return saveSetupState(body);
+});
 
 server.get("/api/sessions", async (request) => {
   const query = filterSchema.parse(request.query);

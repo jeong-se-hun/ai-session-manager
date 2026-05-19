@@ -1,27 +1,29 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getTrashMap } from "./appDb";
-import { appDbPath, claudeHome, codexHome, geminiHome, sessionsRoot } from "./paths";
+import { getStoragePaths } from "./config";
+import { appDbPath } from "./paths";
 import { listThreadRows } from "./scanner";
 import type { DoctorIssue, DoctorResponse } from "../shared/types";
 
 export function runDoctor(): DoctorResponse {
+  const paths = getStoragePaths();
   const rows = listThreadRows();
   const rolloutPaths = new Set(rows.map((row) => row.rollout_path));
-  const files = collectRolloutFiles(sessionsRoot);
+  const files = collectRolloutFiles(paths.sessionsRoot);
   const missing = rows.filter((row) => !fs.existsSync(row.rollout_path));
   const orphan = files.filter((file) => !rolloutPaths.has(file));
   const trash = getTrashMap();
   const issues: DoctorIssue[] = [];
 
-  if (!fs.existsSync(codexHome)) {
-    issues.push({ level: "danger", title: "Codex 홈 없음", detail: `${codexHome} 경로가 없습니다.` });
+  if (!fs.existsSync(paths.codexHome)) {
+    issues.push({ level: "danger", title: "Codex 홈 없음", detail: `${paths.codexHome} 경로가 없습니다.` });
   }
-  if (!fs.existsSync(claudeHome)) {
-    issues.push({ level: "info", title: "Claude 기록 폴더 없음", detail: `${claudeHome} 경로가 없어 Claude 세션은 표시하지 않습니다.` });
+  if (!fs.existsSync(paths.claudeHome)) {
+    issues.push({ level: "info", title: "Claude 기록 폴더 없음", detail: `${paths.claudeHome} 경로가 없어 Claude 세션은 표시하지 않습니다.` });
   }
-  if (!fs.existsSync(geminiHome)) {
-    issues.push({ level: "info", title: "Gemini 기록 폴더 없음", detail: `${geminiHome} 경로가 없어 Gemini 세션은 표시하지 않습니다.` });
+  if (!fs.existsSync(paths.geminiHome)) {
+    issues.push({ level: "info", title: "Gemini 기록 폴더 없음", detail: `${paths.geminiHome} 경로가 없어 Gemini 세션은 표시하지 않습니다.` });
   }
   if (missing.length > 0) {
     issues.push({
@@ -58,9 +60,9 @@ export function runDoctor(): DoctorResponse {
       orphanRolloutFiles: orphan.length,
       trashedItems: trash.size,
       appDbPath,
-      codexHome,
-      claudeHome,
-      geminiHome
+      codexHome: paths.codexHome,
+      claudeHome: paths.claudeHome,
+      geminiHome: paths.geminiHome
     }
   };
 }

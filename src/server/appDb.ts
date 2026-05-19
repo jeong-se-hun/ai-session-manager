@@ -46,6 +46,12 @@ export function getAppDb(): Database.Database {
       created_at TEXT NOT NULL,
       PRIMARY KEY (session_id, tag)
     );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
   return db;
 }
@@ -73,4 +79,31 @@ export function getTrashMap(): Map<string, TrashRecord> {
     .prepare("SELECT * FROM trash_items WHERE restored_at IS NULL AND permanently_deleted_at IS NULL")
     .all() as TrashRecord[];
   return new Map(rows.map((row) => [row.session_id, row]));
+}
+
+export function getSetting(key: string): string | null {
+  const row = getAppDb().prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function getSettings(keys: string[]): Map<string, string> {
+  if (keys.length === 0) return new Map();
+  const placeholders = keys.map(() => "?").join(", ");
+  const rows = getAppDb()
+    .prepare(`SELECT key, value FROM settings WHERE key IN (${placeholders})`)
+    .all(...keys) as Array<{ key: string; value: string }>;
+  return new Map(rows.map((row) => [row.key, row.value]));
+}
+
+export function saveSettings(values: Record<string, string>): void {
+  const now = new Date().toISOString();
+  const stmt = getAppDb().prepare(
+    `INSERT INTO settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  );
+  const tx = getAppDb().transaction((entries: Array<[string, string]>) => {
+    for (const [key, value] of entries) stmt.run(key, value, now);
+  });
+  tx(Object.entries(values));
 }
