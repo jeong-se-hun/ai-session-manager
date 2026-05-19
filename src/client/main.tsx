@@ -29,6 +29,7 @@ import type {
   SetupStateResponse,
   SourceFilter,
   SortKey,
+  TokenConfidence,
   TrashFilter
 } from "../shared/types";
 import anthropicIcon from "./assets/brand-icons/anthropic.svg";
@@ -141,6 +142,13 @@ const sourceLabel: Record<SessionSource, string> = {
   codex: "Codex",
   claude: "Claude",
   gemini: "Gemini"
+};
+
+const tokenConfidenceLabel: Record<TokenConfidence, string> = {
+  high: "높음",
+  medium: "중간",
+  low: "낮음",
+  none: "없음"
 };
 
 const sortLabel: Record<SortKey, string> = {
@@ -1017,7 +1025,7 @@ function SessionRow({
         {shortPath(session.cwd)}
       </td>
       <td className="date-cell">{formatDate(session.updatedAt)}</td>
-      <td className="number-cell token-cell" title={formatTokenTitle(session.tokensUsed)}>
+      <td className="number-cell token-cell" title={formatSessionTokenTitle(session)}>
         <MetricValue {...formatTokenParts(session.tokensUsed)} />
       </td>
       <td className="number-cell">
@@ -1335,9 +1343,16 @@ function formatTokenParts(value: number): { value: string; unit?: string } {
   return { value: value.toLocaleString("ko-KR") };
 }
 
-function formatTokenTitle(value: number): string {
-  if (value <= 0) return "원문에 토큰 정보가 없습니다.";
-  return `${value.toLocaleString("ko-KR")} 토큰`;
+function formatSessionTokenTitle(session: SessionSummaryRow): string {
+  if (session.tokensUsed <= 0) return `${tokenConfidenceLabel[session.tokenConfidence]} · ${session.tokenNote}`;
+  return [
+    `${session.tokensUsed.toLocaleString("ko-KR")} 토큰`,
+    `신뢰도: ${tokenConfidenceLabel[session.tokenConfidence]}`,
+    `출처: ${session.tokenSource}`,
+    session.tokenNote
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function trimDecimal(value: number): string {

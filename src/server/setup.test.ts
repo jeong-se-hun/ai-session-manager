@@ -112,6 +112,12 @@ describe("setup path discovery", () => {
     expect(list.totals.sources.codex.all).toBe(1);
     expect(list.totals.sources.claude.all).toBe(1);
     expect(list.totals.sources.gemini.all).toBe(1);
+    expect(list.sessions.find((session) => session.id === "selected-thread")).toMatchObject({
+      tokensUsed: 12,
+      tokenConfidence: "high",
+      tokenSource: "Codex rollout"
+    });
+    expect(list.totals.sources.codex.tokenCoverage.high).toBe(1);
     expect(list.sessions.map((session) => session.id).sort()).toEqual([
       "claude:selected_claude",
       "gemini:proj:chats:session-selected",
@@ -170,7 +176,8 @@ describe("setup path discovery", () => {
       id: "gemini:proj:chats:session-jsonl",
       title: "Gemini JSONL 테스트",
       firstUserMessage: "Gemini JSONL 테스트",
-      tokensUsed: 5
+      tokensUsed: 5,
+      tokenConfidence: "medium"
     });
   });
 });
@@ -183,7 +190,12 @@ function createCodexFixture(root: string, sessionId: string): void {
     rolloutPath,
     [
       JSON.stringify({ timestamp: "2026-01-01T00:00:00.000Z", type: "event_msg", payload: { type: "user_message", message: "설정 테스트" } }),
-      JSON.stringify({ timestamp: "2026-01-01T00:00:01.000Z", type: "event_msg", payload: { type: "agent_message", message: "완료" } })
+      JSON.stringify({ timestamp: "2026-01-01T00:00:01.000Z", type: "event_msg", payload: { type: "agent_message", message: "완료" } }),
+      JSON.stringify({
+        timestamp: "2026-01-01T00:00:02.000Z",
+        type: "event_msg",
+        payload: { type: "token_count", info: { total_token_usage: { input_tokens: 5, cached_input_tokens: 4, output_tokens: 7, reasoning_output_tokens: 3 } } }
+      })
     ].join("\n"),
     "utf8"
   );
@@ -265,7 +277,7 @@ function createGeminiJsonlFixture(root: string): void {
         type: "assistant",
         timestamp: "2026-01-01T00:00:01.000Z",
         content: [{ text: "완료" }],
-        usage: { promptTokenCount: 2, candidatesTokenCount: 3 }
+        usage: { promptTokenCount: 2, cachedContentTokenCount: 2, candidatesTokenCount: 3 }
       })
     ].join("\n") + "\n",
     "utf8"

@@ -11,7 +11,9 @@ import type {
   SessionFilters,
   SessionListResponse,
   SessionSource,
-  SessionSummaryRow
+  SessionSummaryRow,
+  TokenConfidence,
+  TokenCoverage
 } from "../shared/types";
 
 interface ThreadRow {
@@ -35,11 +37,32 @@ interface ThreadRow {
 
 type AnyPayload = Record<string, unknown>;
 
+interface TokenInfo {
+  value: number;
+  confidence: TokenConfidence;
+  source: string;
+  note: string;
+}
+
+interface TokenEvidence {
+  total: number;
+  hasExactTotal: boolean;
+  hasComponents: boolean;
+}
+
+type TokenEvidenceMode = "standard" | "claude" | "gemini";
+
 const SESSION_SOURCES: SessionSource[] = ["codex", "claude", "gemini"];
 const SOURCE_LABELS: Record<SessionSource, string> = {
   codex: "Codex",
   claude: "Claude",
   gemini: "Gemini"
+};
+const TOKEN_CONFIDENCE_RANK: Record<TokenConfidence, number> = {
+  none: 0,
+  low: 1,
+  medium: 2,
+  high: 3
 };
 
 export function openStateDb(readonly = true): Database.Database {
@@ -114,6 +137,7 @@ export async function listSessions(filters: SessionFilters = {}): Promise<Sessio
       trashed: allSessions.filter((session) => session.trashed).length,
       missingFiles: allSessions.filter((session) => !session.fileExists).length,
       totalBytes: allSessions.reduce((sum, session) => sum + session.fileSize, 0),
+      tokenCoverage: buildTokenCoverage(allSessions),
       sources: buildSourceTotals(allSessions, filtered),
       codexHome: paths.codexHome,
       claudeHome: paths.claudeHome,
@@ -152,8 +176,19 @@ async function listCodexSessions(
   for (const row of rows) {
     const stat = safeStat(row.rollout_path);
     const trashRecord = trash.get(row.id);
-    const fallbackMeta = stat && !history.has(row.id) ? await readCodexSessionMeta(row.rollout_path, stat) : null;
-    sessions.push({
+    const fileMeta = stat ? await readCodexSessionMeta(row.rollout_path, stat) : null;
+    const tokenInfo = mergeTokenInfos(
+      fileMeta?.tokenInfo,
+      row.tokens_used > 0
+        ? createTokenInfo(
+            row.tokens_used,
+            stat ? "medium" : "low",
+            "Codex DB",
+            stat ? "목록 DB에 저장된 tokens_used 값입니다." : "원문 파일이 없어 목록 DB 값만 확인했습니다."
+          )
+        : null
+    );
+    sessions.push(withTokenInfo({
       id: row.id,
       title: row.title || row.first_user_message || row.id,
       firstUserMessage: row.first_user_message || "",
@@ -166,15 +201,14 @@ async function listCodexSessions(
       updatedAt: toIsoFromMillis(row.updated_at_ms) ?? toIsoFromSeconds(row.updated_at) ?? new Date(0).toISOString(),
       archived: Boolean(row.archived),
       archivedAt: toIsoFromSeconds(row.archived_at),
-      tokensUsed: row.tokens_used,
       rolloutPath: row.rollout_path,
       fileExists: Boolean(stat),
       fileSize: stat?.size ?? 0,
-      lastUserMessage: history.get(row.id) ?? fallbackMeta?.lastUserMessage ?? "",
+      lastUserMessage: history.get(row.id) ?? fileMeta?.lastUserMessage ?? "",
       trashed: Boolean(trashRecord),
       trashDeletedAt: trashRecord?.deleted_at ?? null,
       summary: summaries.get(row.id) ?? null
-    });
+    }, tokenInfo));
   }
 
   const orphanFiles = collectCodexRolloutFiles().filter((filePath) => !rowPaths.has(filePath));
@@ -184,7 +218,7 @@ async function listCodexSessions(
     const meta = await readCodexSessionMeta(filePath, stat);
     if (rowIds.has(meta.id)) continue;
     const trashRecord = trash.get(meta.id);
-    sessions.push({
+    sessions.push(withTokenInfo({
       id: meta.id,
       title: meta.title,
       firstUserMessage: meta.firstUserMessage,
@@ -197,7 +231,6 @@ async function listCodexSessions(
       updatedAt: meta.updatedAt,
       archived: false,
       archivedAt: null,
-      tokensUsed: meta.tokensUsed,
       rolloutPath: filePath,
       fileExists: true,
       fileSize: stat.size,
@@ -205,7 +238,7 @@ async function listCodexSessions(
       trashed: Boolean(trashRecord),
       trashDeletedAt: trashRecord?.deleted_at ?? null,
       summary: summaries.get(meta.id) ?? null
-    });
+    }, meta.tokenInfo));
   }
 
   return sessions;
@@ -233,7 +266,7 @@ async function listClaudeSessions(
     const meta = await readClaudeSessionMeta(filePath, stat);
     const relatedSize = getClaudeRelatedSize(filePath);
     const trashRecord = trash.get(id);
-    sessions.push({
+    sessions.push(withTokenInfo({
       id,
       title: meta.title || nativeId,
       firstUserMessage: meta.firstUserMessage,
@@ -246,7 +279,6 @@ async function listClaudeSessions(
       updatedAt: meta.updatedAt,
       archived: false,
       archivedAt: null,
-      tokensUsed: meta.tokensUsed,
       rolloutPath: filePath,
       fileExists: true,
       fileSize: stat.size + relatedSize,
@@ -254,7 +286,7 @@ async function listClaudeSessions(
       trashed: Boolean(trashRecord),
       trashDeletedAt: trashRecord?.deleted_at ?? null,
       summary: summaries.get(id) ?? null
-    });
+    }, meta.tokenInfo));
   }
 
   return sessions;
@@ -284,7 +316,7 @@ function listGeminiSessions(
     const trashRecord = trash.get(id);
 
     return [
-      {
+      withTokenInfo({
         id,
         title: meta.title || sessionId,
         firstUserMessage: meta.firstUserMessage,
@@ -297,7 +329,6 @@ function listGeminiSessions(
         updatedAt: meta.updatedAt,
         archived: false,
         archivedAt: null,
-        tokensUsed: meta.tokensUsed,
         rolloutPath: filePath,
         fileExists: true,
         fileSize: stat.size,
@@ -305,7 +336,7 @@ function listGeminiSessions(
         trashed: Boolean(trashRecord),
         trashDeletedAt: trashRecord?.deleted_at ?? null,
         summary: summaries.get(id) ?? null
-      }
+      }, meta.tokenInfo)
     ];
   });
 }
@@ -410,7 +441,7 @@ async function readCodexSessionMeta(filePath: string, stat: fs.Stats): Promise<{
   model: string | null;
   reasoningEffort: string | null;
   cliVersion: string;
-  tokensUsed: number;
+  tokenInfo: TokenInfo;
   createdAt: string;
   updatedAt: string;
 }> {
@@ -421,7 +452,9 @@ async function readCodexSessionMeta(filePath: string, stat: fs.Stats): Promise<{
   let model: string | null = null;
   let reasoningEffort: string | null = null;
   let cliVersion = "";
-  let tokensUsed = 0;
+  let tokenInfo = createEmptyTokenInfo();
+  let lastUsageTotal = 0;
+  let lastUsageCount = 0;
   let firstTimestampMs: number | null = null;
   let lastTimestampMs: number | null = null;
 
@@ -441,12 +474,28 @@ async function readCodexSessionMeta(filePath: string, stat: fs.Stats): Promise<{
       if (typeof payload.reasoning_effort === "string") reasoningEffort = payload.reasoning_effort;
     }
 
-    tokensUsed = Math.max(
-      tokensUsed,
-      extractTokenTotal(value.tokens),
-      extractTokenTotal(value.usage),
-      extractTokenTotal(payload.tokens),
-      extractTokenTotal(payload.usage)
+    if (type === "event_msg" && payload.type === "token_count") {
+      const info = isRecord(payload.info) ? payload.info : {};
+      const totalUsage = extractTokenEvidence(info.total_token_usage, "standard");
+      if (totalUsage.total > 0) {
+        tokenInfo = preferTokenInfo(
+          tokenInfo,
+          createTokenInfo(totalUsage.total, "high", "Codex rollout", "원문 token_count의 total_token_usage 값입니다.")
+        );
+      }
+      const lastUsage = extractTokenEvidence(info.last_token_usage, "standard");
+      if (lastUsage.total > 0) {
+        lastUsageTotal += lastUsage.total;
+        lastUsageCount += 1;
+      }
+    }
+
+    tokenInfo = preferTokenInfo(
+      tokenInfo,
+      createTokenInfoFromEvidence(extractTokenEvidence(value.tokens, "standard"), "Codex 원문", "원문 tokens 필드에서 계산했습니다.", "medium", "low"),
+      createTokenInfoFromEvidence(extractTokenEvidence(value.usage, "standard"), "Codex 원문", "원문 usage 필드에서 계산했습니다.", "medium", "low"),
+      createTokenInfoFromEvidence(extractTokenEvidence(payload.tokens, "standard"), "Codex 원문", "payload tokens 필드에서 계산했습니다.", "medium", "low"),
+      createTokenInfoFromEvidence(extractTokenEvidence(payload.usage, "standard"), "Codex 원문", "payload usage 필드에서 계산했습니다.", "medium", "low")
     );
 
     const userText = extractCodexUserText(value);
@@ -455,6 +504,15 @@ async function readCodexSessionMeta(filePath: string, stat: fs.Stats): Promise<{
       lastUserMessage = truncateText(userText, 240);
     }
   });
+
+  if (tokenInfo.confidence === "none" && lastUsageTotal > 0) {
+    tokenInfo = createTokenInfo(
+      lastUsageTotal,
+      "medium",
+      "Codex rollout",
+      `${lastUsageCount.toLocaleString("ko-KR")}개 last_token_usage 값을 합산했습니다.`
+    );
+  }
 
   return {
     id,
@@ -465,7 +523,7 @@ async function readCodexSessionMeta(filePath: string, stat: fs.Stats): Promise<{
     model,
     reasoningEffort,
     cliVersion,
-    tokensUsed,
+    tokenInfo,
     createdAt: toIsoFromMillis(firstTimestampMs) ?? stat.birthtime.toISOString(),
     updatedAt: toIsoFromMillis(lastTimestampMs) ?? stat.mtime.toISOString()
   };
@@ -591,7 +649,7 @@ async function readClaudeSessionMeta(filePath: string, stat: fs.Stats): Promise<
   firstUserMessage: string;
   lastUserMessage: string;
   model: string | null;
-  tokensUsed: number;
+  tokenInfo: TokenInfo;
   cwd: string;
   createdAt: string;
   updatedAt: string;
@@ -602,10 +660,27 @@ async function readClaudeSessionMeta(filePath: string, stat: fs.Stats): Promise<
   let lastTimestampMs: number | null = null;
   let model: string | null = null;
   let cwd = "";
-  let legacyTokensUsed = 0;
-  const usageTokensByKey = new Map<string, number>();
+  let legacyTokenInfo = createEmptyTokenInfo();
+  const usageTokensByKey = new Map<string, { value: number; related: boolean }>();
 
-  await readJsonl<AnyPayload>(filePath, ({ value }) => {
+  const recordTokenUsage = (value: AnyPayload, fileTag: string, line: number): void => {
+    legacyTokenInfo = preferTokenInfo(
+      legacyTokenInfo,
+      createTokenInfoFromEvidence(extractTokenEvidence(value.tokens, "claude"), "Claude 원문", "원문 tokens 필드에서 계산했습니다.", "low", "low")
+    );
+
+    const usageTotal = extractTokenEvidence(extractClaudeUsage(value), "claude").total;
+    if (usageTotal > 0) {
+      const usageKey = `${fileTag}:${getClaudeUsageKey(value) ?? `${line}:${usageTotal}`}`;
+      const previous = usageTokensByKey.get(usageKey);
+      usageTokensByKey.set(usageKey, {
+        value: Math.max(previous?.value ?? 0, usageTotal),
+        related: Boolean(previous?.related) || fileTag !== "main"
+      });
+    }
+  };
+
+  await readJsonl<AnyPayload>(filePath, ({ line, value }) => {
     const timestamp = typeof value.timestamp === "string" ? value.timestamp : null;
     updateTimestampBounds(timestamp, (next) => {
       firstTimestampMs = firstTimestampMs === null ? next : Math.min(firstTimestampMs, next);
@@ -614,13 +689,7 @@ async function readClaudeSessionMeta(filePath: string, stat: fs.Stats): Promise<
     if (typeof value.model === "string") model = value.model;
     if (!cwd && typeof value.cwd === "string") cwd = value.cwd;
     if (!model && isRecord(value.message) && typeof value.message.model === "string") model = value.message.model;
-    legacyTokensUsed = Math.max(legacyTokensUsed, extractTokenTotal(value.tokens));
-
-    const usageTotal = extractTokenTotal(extractClaudeUsage(value));
-    if (usageTotal > 0) {
-      const usageKey = getClaudeUsageKey(value) ?? `${timestamp ?? "unknown"}:${usageTotal}:${usageTokensByKey.size}`;
-      usageTokensByKey.set(usageKey, Math.max(usageTokensByKey.get(usageKey) ?? 0, usageTotal));
-    }
+    recordTokenUsage(value, "main", line);
 
     const role = isRecord(value.message) && typeof value.message.role === "string" ? value.message.role : "";
     if (value.type === "user" || role === "user") {
@@ -632,12 +701,34 @@ async function readClaudeSessionMeta(filePath: string, stat: fs.Stats): Promise<
     }
   });
 
+  for (const relatedPath of getClaudeRelatedJsonlFiles(filePath)) {
+    const relative = path.relative(path.dirname(filePath), relatedPath);
+    await readJsonl<AnyPayload>(relatedPath, ({ line, value }) => {
+      recordTokenUsage(value, `related:${relative}`, line);
+    });
+  }
+
+  const usageEntries = [...usageTokensByKey.values()];
+  const usageTotal = usageEntries.reduce((sum, entry) => sum + entry.value, 0);
+  const hasRelatedUsage = usageEntries.some((entry) => entry.related);
+  const usageTokenInfo =
+    usageTotal > 0
+      ? createTokenInfo(
+          usageTotal,
+          "high",
+          hasRelatedUsage ? "Claude usage + 하위 작업" : "Claude usage",
+          hasRelatedUsage
+            ? "Claude usage 필드와 같은 세션 하위 작업 JSONL을 함께 합산했습니다."
+            : "Claude usage 필드의 input/output/cache 토큰을 합산했습니다."
+        )
+      : createEmptyTokenInfo();
+
   return {
     title: firstUserMessage || path.basename(filePath, ".jsonl"),
     firstUserMessage,
     lastUserMessage,
     model,
-    tokensUsed: Math.max(legacyTokensUsed, [...usageTokensByKey.values()].reduce((sum, value) => sum + value, 0)),
+    tokenInfo: preferTokenInfo(usageTokenInfo, legacyTokenInfo),
     cwd,
     createdAt: toIsoFromMillis(firstTimestampMs) ?? stat.birthtime.toISOString(),
     updatedAt: toIsoFromMillis(lastTimestampMs) ?? stat.mtime.toISOString()
@@ -653,14 +744,17 @@ function readGeminiSessionMeta(
   firstUserMessage: string;
   lastUserMessage: string;
   model: string | null;
-  tokensUsed: number;
+  tokenInfo: TokenInfo;
   createdAt: string;
   updatedAt: string;
 } {
   let firstUserMessage = "";
   let lastUserMessage = "";
   let model: string | null = null;
-  let tokensUsed = 0;
+  let tokenInfo = createEmptyTokenInfo();
+  let messageTokenTotal = 0;
+  let messageTokenCount = 0;
+  let messageTokenConfidence: TokenConfidence = "none";
   let firstTimestampMs: number | null = null;
   let lastTimestampMs: number | null = null;
 
@@ -670,12 +764,17 @@ function readGeminiSessionMeta(
   updateTimestampBounds(raw.lastUpdated, (next) => {
     lastTimestampMs = lastTimestampMs === null ? next : Math.max(lastTimestampMs, next);
   });
+  tokenInfo = preferTokenInfo(tokenInfo, readGeminiTokenInfo(raw));
 
   for (const message of messages) {
     if (typeof message.model === "string") model = message.model;
     if (!model && typeof message.modelVersion === "string") model = message.modelVersion;
-    tokensUsed += extractTokenTotal(message.tokens);
-    tokensUsed += extractTokenTotal(message.usage);
+    const messageTokenInfo = readGeminiTokenInfo(message);
+    if (messageTokenInfo.value > 0) {
+      messageTokenTotal += messageTokenInfo.value;
+      messageTokenCount += 1;
+      messageTokenConfidence = lowerTokenConfidence(messageTokenConfidence, messageTokenInfo.confidence);
+    }
     updateTimestampBounds(message.timestamp, (next) => {
       firstTimestampMs = firstTimestampMs === null ? next : Math.min(firstTimestampMs, next);
       lastTimestampMs = lastTimestampMs === null ? next : Math.max(lastTimestampMs, next);
@@ -689,12 +788,24 @@ function readGeminiSessionMeta(
     }
   }
 
+  if (messageTokenTotal > 0) {
+    tokenInfo = preferTokenInfo(
+      tokenInfo,
+      createTokenInfo(
+        messageTokenTotal,
+        messageTokenConfidence === "none" ? "medium" : messageTokenConfidence,
+        "Gemini 세션",
+        `${messageTokenCount.toLocaleString("ko-KR")}개 메시지의 토큰 기록을 합산했습니다.`
+      )
+    );
+  }
+
   return {
     title: firstUserMessage,
     firstUserMessage,
     lastUserMessage,
     model,
-    tokensUsed,
+    tokenInfo,
     createdAt: toIsoFromMillis(firstTimestampMs) ?? stat.birthtime.toISOString(),
     updatedAt: toIsoFromMillis(lastTimestampMs) ?? stat.mtime.toISOString()
   };
@@ -762,7 +873,9 @@ function looksLikeGeminiMessage(value: Record<string, unknown>): boolean {
     value.parts !== undefined ||
     value.text !== undefined ||
     value.usage !== undefined ||
-    value.tokens !== undefined
+    value.tokens !== undefined ||
+    value.usageMetadata !== undefined ||
+    value.usage_metadata !== undefined
   );
 }
 
@@ -776,6 +889,32 @@ function getGeminiMessageType(message: Record<string, unknown>): string {
 
 function extractGeminiMessageText(message: Record<string, unknown>): string {
   return extractAnyText(message.content) || extractAnyText(message.parts) || extractAnyText(message.text);
+}
+
+function readGeminiTokenInfo(value: Record<string, unknown>): TokenInfo {
+  let best = createEmptyTokenInfo();
+  const candidates = [
+    { value: value.tokens, source: "Gemini tokens", note: "Gemini 로컬 세션 tokens 필드입니다." },
+    { value: value.usageMetadata, source: "Gemini usageMetadata", note: "Gemini API usageMetadata 필드입니다." },
+    { value: value.usage_metadata, source: "Gemini usageMetadata", note: "Gemini API usage_metadata 필드입니다." },
+    { value: value.usage, source: "Gemini usage", note: "Gemini usage 필드에서 계산했습니다." }
+  ];
+
+  if (isRecord(value.response)) {
+    candidates.push(
+      { value: value.response.usageMetadata, source: "Gemini response", note: "응답 usageMetadata 필드입니다." },
+      { value: value.response.usage_metadata, source: "Gemini response", note: "응답 usage_metadata 필드입니다." },
+      { value: value.response.usage, source: "Gemini response", note: "응답 usage 필드입니다." }
+    );
+  }
+
+  for (const candidate of candidates) {
+    best = preferTokenInfo(
+      best,
+      createTokenInfoFromEvidence(extractTokenEvidence(candidate.value, "gemini"), candidate.source, candidate.note, "high", "medium")
+    );
+  }
+  return best;
 }
 
 function readGeminiProjectRoots(): Map<string, string> {
@@ -820,11 +959,89 @@ function buildSourceTotals(
           all: all.length,
           visible: visible.length,
           trashed: all.filter((session) => session.trashed).length,
-          totalBytes: all.reduce((sum, session) => sum + session.fileSize, 0)
+          totalBytes: all.reduce((sum, session) => sum + session.fileSize, 0),
+          tokenCoverage: buildTokenCoverage(all)
         }
       ];
     })
   ) as SessionListResponse["totals"]["sources"];
+}
+
+function buildTokenCoverage(sessions: SessionSummaryRow[]): TokenCoverage {
+  return {
+    total: sessions.length,
+    withTokens: sessions.filter((session) => session.tokensUsed > 0).length,
+    high: sessions.filter((session) => session.tokenConfidence === "high").length,
+    medium: sessions.filter((session) => session.tokenConfidence === "medium").length,
+    low: sessions.filter((session) => session.tokenConfidence === "low").length,
+    none: sessions.filter((session) => session.tokenConfidence === "none").length
+  };
+}
+
+function withTokenInfo(
+  session: Omit<SessionSummaryRow, "tokensUsed" | "tokenConfidence" | "tokenSource" | "tokenNote">,
+  tokenInfo: TokenInfo | null | undefined
+): SessionSummaryRow {
+  const resolved = tokenInfo ?? createEmptyTokenInfo();
+  return {
+    ...session,
+    tokensUsed: resolved.value,
+    tokenConfidence: resolved.confidence,
+    tokenSource: resolved.source,
+    tokenNote: resolved.note
+  };
+}
+
+function createEmptyTokenInfo(note = "토큰 기록을 찾지 못했습니다."): TokenInfo {
+  return {
+    value: 0,
+    confidence: "none",
+    source: "없음",
+    note
+  };
+}
+
+function createTokenInfo(value: number, confidence: Exclude<TokenConfidence, "none">, source: string, note: string): TokenInfo {
+  if (!Number.isFinite(value) || value <= 0) return createEmptyTokenInfo();
+  return {
+    value: Math.round(value),
+    confidence,
+    source,
+    note
+  };
+}
+
+function createTokenInfoFromEvidence(
+  evidence: TokenEvidence,
+  source: string,
+  note: string,
+  exactConfidence: Exclude<TokenConfidence, "none">,
+  componentConfidence: Exclude<TokenConfidence, "none">
+): TokenInfo {
+  if (evidence.total <= 0) return createEmptyTokenInfo();
+  return createTokenInfo(evidence.total, evidence.hasExactTotal ? exactConfidence : componentConfidence, source, note);
+}
+
+function preferTokenInfo(...infos: Array<TokenInfo | null | undefined>): TokenInfo {
+  return infos.reduce<TokenInfo>((best, next) => {
+    if (!next || next.value <= 0) return best;
+    if (best.value <= 0) return next;
+    const nextRank = TOKEN_CONFIDENCE_RANK[next.confidence];
+    const bestRank = TOKEN_CONFIDENCE_RANK[best.confidence];
+    if (nextRank > bestRank) return next;
+    if (nextRank === bestRank && next.value > best.value) return next;
+    return best;
+  }, createEmptyTokenInfo());
+}
+
+function mergeTokenInfos(...infos: Array<TokenInfo | null | undefined>): TokenInfo {
+  return preferTokenInfo(...infos);
+}
+
+function lowerTokenConfidence(current: TokenConfidence, next: TokenConfidence): TokenConfidence {
+  if (current === "none") return next;
+  if (next === "none") return current;
+  return TOKEN_CONFIDENCE_RANK[next] < TOKEN_CONFIDENCE_RANK[current] ? next : current;
 }
 
 function safeStat(filePath: string): fs.Stats | null {
@@ -880,6 +1097,12 @@ function getClaudeRelatedSize(filePath: string): number {
   return collectFiles(relatedDir, (_filePath, entry) => entry.isFile()).reduce((sum, relatedPath) => {
     return sum + (safeStat(relatedPath)?.size ?? 0);
   }, 0);
+}
+
+function getClaudeRelatedJsonlFiles(filePath: string): string[] {
+  const relatedDir = getClaudeRelatedDir(filePath);
+  if (!relatedDir || !fs.existsSync(relatedDir)) return [];
+  return collectFiles(relatedDir, (relatedPath, entry) => entry.isFile() && relatedPath.endsWith(".jsonl"));
 }
 
 function getClaudeRelatedDir(filePath: string): string | null {
@@ -1096,38 +1319,80 @@ function isUsefulClaudeUserText(text: string, value: AnyPayload): boolean {
 }
 
 function extractTokenTotal(value: unknown): number {
-  if (!isRecord(value)) return 0;
-  const explicitTotal = firstFiniteNumber(value.total, value.total_tokens, value.totalTokens, value.totalTokenCount);
-  if (explicitTotal > 0) return explicitTotal;
+  return extractTokenEvidence(value).total;
+}
 
-  const topLevelTotal = sumFiniteNumbers(
+function extractTokenEvidence(value: unknown, mode: TokenEvidenceMode = "standard"): TokenEvidence {
+  if (!isRecord(value)) return { total: 0, hasExactTotal: false, hasComponents: false };
+  const explicitTotal = firstFiniteNumber(
+    value.total,
+    value.total_tokens,
+    value.totalTokens,
+    value.totalTokenCount,
+    value.total_token_count
+  );
+  if (explicitTotal > 0) {
+    return { total: explicitTotal, hasExactTotal: true, hasComponents: false };
+  }
+
+  const topLevelTotal =
+    mode === "claude" ? extractClaudeTokenComponentTotal(value) : mode === "gemini" ? extractGeminiTokenComponentTotal(value) : extractStandardTokenComponentTotal(value);
+  if (topLevelTotal > 0) {
+    return { total: topLevelTotal, hasExactTotal: false, hasComponents: true };
+  }
+
+  if (isRecord(value.cache_creation)) {
+    const cacheCreationTotal = sumFiniteNumbers(value.cache_creation.ephemeral_1h_input_tokens, value.cache_creation.ephemeral_5m_input_tokens);
+    if (cacheCreationTotal > 0) {
+      return { total: cacheCreationTotal, hasExactTotal: false, hasComponents: true };
+    }
+  }
+  return { total: 0, hasExactTotal: false, hasComponents: false };
+}
+
+function extractStandardTokenComponentTotal(value: Record<string, unknown>): number {
+  const input = firstFiniteNumber(value.input_tokens, value.prompt_tokens, value.input, value.promptTokenCount, value.prompt_token_count);
+  const output = firstFiniteNumber(value.output_tokens, value.completion_tokens, value.output, value.candidatesTokenCount, value.candidates_token_count);
+  const fallbackInput = input > 0 ? 0 : firstFiniteNumber(value.cached_input_tokens);
+  const fallbackOutput = output > 0 ? 0 : firstFiniteNumber(value.reasoning_output_tokens);
+  return sumFiniteNumbers(input, output, fallbackInput, fallbackOutput);
+}
+
+function extractClaudeTokenComponentTotal(value: Record<string, unknown>): number {
+  return sumFiniteNumbers(
     value.input_tokens,
     value.output_tokens,
     value.cache_creation_input_tokens,
-    value.cache_read_input_tokens,
-    value.input,
-    value.output,
-    value.cached,
-    value.thoughts,
-    value.tool,
-    value.prompt_tokens,
-    value.completion_tokens,
-    value.promptTokenCount,
-    value.candidatesTokenCount,
-    value.thoughtsTokenCount,
-    value.toolUsePromptTokenCount
+    value.cache_read_input_tokens
   );
-  if (topLevelTotal > 0) return topLevelTotal;
+}
 
-  if (isRecord(value.cache_creation)) {
-    return sumFiniteNumbers(value.cache_creation.ephemeral_1h_input_tokens, value.cache_creation.ephemeral_5m_input_tokens);
-  }
-  return 0;
+function extractGeminiTokenComponentTotal(value: Record<string, unknown>): number {
+  const prompt = firstFiniteNumber(value.promptTokenCount, value.prompt_token_count, value.input);
+  const candidates = firstFiniteNumber(value.candidatesTokenCount, value.candidates_token_count, value.output);
+  const thoughts = firstFiniteNumber(value.thoughtsTokenCount, value.thoughts_token_count, value.thoughts);
+  const tool = firstFiniteNumber(value.toolUsePromptTokenCount, value.tool_use_prompt_token_count, value.tool);
+  const fallbackPrompt = prompt > 0 ? 0 : sumModalityTokenCounts(value.promptTokensDetails);
+  const fallbackCandidates = candidates > 0 ? 0 : sumModalityTokenCounts(value.candidatesTokensDetails);
+  const fallbackTool = tool > 0 ? 0 : sumModalityTokenCounts(value.toolUsePromptTokensDetails);
+  return sumFiniteNumbers(prompt, candidates, thoughts, tool, fallbackPrompt, fallbackCandidates, fallbackTool);
+}
+
+function sumModalityTokenCounts(value: unknown): number {
+  if (!Array.isArray(value)) return 0;
+  return value.reduce((sum, item) => {
+    if (!isRecord(item)) return sum;
+    return sum + firstFiniteNumber(item.tokenCount, item.token_count);
+  }, 0);
 }
 
 function firstFiniteNumber(...values: unknown[]): number {
   for (const value of values) {
     if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
   }
   return 0;
 }
@@ -1136,6 +1401,10 @@ function sumFiniteNumbers(...values: unknown[]): number {
   let sum = 0;
   for (const value of values) {
     if (typeof value === "number" && Number.isFinite(value)) sum += value;
+    else if (typeof value === "string" && value.trim() !== "") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) sum += parsed;
+    }
   }
   return sum;
 }

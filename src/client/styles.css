@@ -1230,6 +1230,10 @@ tbody tr.active-row:hover td {
   min-width: 68px;
 }
 
+.token-cell {
+  vertical-align: middle;
+}
+
 .metric-value small {
   color: var(--muted);
   font-size: 11px;

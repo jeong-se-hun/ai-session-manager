@@ -303,6 +303,18 @@ describe("session operations", () => {
           timestamp: "2026-01-03T00:00:02.000Z",
           cwd: "/tmp/project",
           message: { role: "user", content: "Claude 하위 작업 로그" }
+        }),
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-01-03T00:00:03.000Z",
+          cwd: "/tmp/project",
+          requestId: "req-subagent-1",
+          message: {
+            id: "msg-subagent-1",
+            role: "assistant",
+            content: [{ type: "text", text: "하위 작업 완료" }],
+            usage: { input_tokens: 2, output_tokens: 4 }
+          }
         })
       ].join("\n"),
       "utf8"
@@ -356,10 +368,22 @@ describe("session operations", () => {
     expect(initial.sessions.find((session) => session.id === "claude:project:-tmp-project:c-project")?.fileSize).toBeGreaterThan(
       fs.statSync(claudeProjectPath).size
     );
-    expect(initial.sessions.find((session) => session.id === "claude:ses_fixture")?.tokensUsed).toBe(15);
-    expect(initial.sessions.find((session) => session.id === "claude:project:-tmp-project:c-project")?.tokensUsed).toBe(25);
+    expect(initial.sessions.find((session) => session.id === "claude:ses_fixture")).toMatchObject({
+      tokensUsed: 15,
+      tokenConfidence: "high"
+    });
+    expect(initial.sessions.find((session) => session.id === "claude:project:-tmp-project:c-project")).toMatchObject({
+      tokensUsed: 31,
+      tokenConfidence: "high",
+      tokenSource: "Claude usage + 하위 작업"
+    });
     expect(initial.sessions.find((session) => session.id === "gemini:proj:chats:session-fixture")?.cwd).toBe(geminiProjectRoot);
-    expect(initial.sessions.find((session) => session.id === "gemini:proj:chats:session-fixture")?.tokensUsed).toBe(140);
+    expect(initial.sessions.find((session) => session.id === "gemini:proj:chats:session-fixture")).toMatchObject({
+      tokensUsed: 140,
+      tokenConfidence: "medium"
+    });
+    expect(initial.totals.sources.claude.tokenCoverage.high).toBe(2);
+    expect(initial.totals.sources.gemini.tokenCoverage.medium).toBe(1);
     await expect(getSessionDetail("claude:project:-tmp-project:c-project")).resolves.toMatchObject({
       session: { id: "claude:project:-tmp-project:c-project", source: "claude" },
       rawLineCount: 4

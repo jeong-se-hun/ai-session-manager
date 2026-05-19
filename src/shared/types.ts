@@ -15,6 +15,17 @@ export type SessionSource = "codex" | "claude" | "gemini";
 
 export type SourceFilter = "all" | SessionSource;
 
+export type TokenConfidence = "high" | "medium" | "low" | "none";
+
+export interface TokenCoverage {
+  total: number;
+  withTokens: number;
+  high: number;
+  medium: number;
+  low: number;
+  none: number;
+}
+
 export type SetupCandidateStatus = "ready" | "partial" | "missing";
 
 export type SetupCandidateConfidence = "high" | "medium" | "low";
@@ -96,6 +107,9 @@ export interface SessionSummaryRow {
   archived: boolean;
   archivedAt: string | null;
   tokensUsed: number;
+  tokenConfidence: TokenConfidence;
+  tokenSource: string;
+  tokenNote: string;
   rolloutPath: string;
   fileExists: boolean;
   fileSize: number;
@@ -114,6 +128,7 @@ export interface SessionListResponse {
     trashed: number;
     missingFiles: number;
     totalBytes: number;
+    tokenCoverage: TokenCoverage;
     sources: Record<
       SessionSource,
       {
@@ -121,6 +136,7 @@ export interface SessionListResponse {
         visible: number;
         trashed: number;
         totalBytes: number;
+        tokenCoverage: TokenCoverage;
       }
     >;
     codexHome: string;
