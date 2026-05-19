@@ -53,8 +53,16 @@ export function getDefaultHomes(): ConfiguredHomes {
 export function getEnvHomes(): Record<keyof ConfiguredHomes, string | null> {
   return {
     codexHome: process.env.CODEX_HOME ? normalizeHome(process.env.CODEX_HOME) : null,
-    claudeHome: process.env.CLAUDE_HOME ? normalizeHome(process.env.CLAUDE_HOME) : null,
-    geminiHome: process.env.GEMINI_HOME ? normalizeHome(process.env.GEMINI_HOME) : null
+    claudeHome: process.env.CLAUDE_HOME
+      ? normalizeHome(process.env.CLAUDE_HOME)
+      : process.env.CLAUDE_CONFIG_DIR
+        ? normalizeHome(process.env.CLAUDE_CONFIG_DIR)
+        : null,
+    geminiHome: process.env.GEMINI_HOME
+      ? normalizeHome(process.env.GEMINI_HOME)
+      : process.env.GEMINI_CLI_HOME
+        ? normalizeHome(process.env.GEMINI_CLI_HOME)
+        : null
   };
 }
 

@@ -34,24 +34,28 @@ Gemini:     ~/.gemini
 ```bash
 CODEX_HOME=/path/to/.codex
 CLAUDE_HOME=/path/to/.claude
+CLAUDE_CONFIG_DIR=/path/to/.claude
 GEMINI_HOME=/path/to/.gemini
+GEMINI_CLI_HOME=/path/to/.gemini
 CODEX_SESSION_MANAGER_HOME=/path/to/app-data
 ```
+
+`CLAUDE_HOME`이 없으면 `CLAUDE_CONFIG_DIR`을, `GEMINI_HOME`이 없으면 `GEMINI_CLI_HOME`을 사용합니다.
 
 폴더를 직접 지정해야 한다면 아래 기준으로 찾으면 됩니다.
 
 ```txt
 Codex 폴더
 - 보통 ~/.codex
-- 안에 state_5.sqlite 또는 sessions 폴더가 있으면 맞습니다.
+- 안에 state_5.sqlite, session_index.jsonl, history.jsonl, sessions 폴더가 있으면 맞습니다.
 
 Claude 폴더
 - 보통 ~/.claude
-- 안에 projects 또는 transcripts 폴더가 있으면 맞습니다.
+- 안에 projects, transcripts, settings.json, todos 폴더가 있으면 맞습니다.
 
 Gemini 폴더
 - 보통 ~/.gemini
-- 안에 tmp 또는 history 폴더가 있으면 맞습니다.
+- 안에 tmp, history, settings.json, oauth_creds.json 폴더가 있으면 맞습니다.
 ```
 
 ## OS 지원 상태
@@ -63,7 +67,7 @@ Windows: 실험적 지원
 WSL:     환경변수로 Windows 쪽 기록 경로를 직접 지정하는 것을 권장
 ```
 
-Windows 또는 WSL에서는 실제 CLI가 기록을 저장하는 위치가 다를 수 있습니다. 이 경우 `CODEX_HOME`, `CLAUDE_HOME`, `GEMINI_HOME`을 직접 지정하세요.
+Windows 또는 WSL에서는 실제 CLI가 기록을 저장하는 위치가 다를 수 있습니다. 이 경우 `CODEX_HOME`, `CLAUDE_HOME` 또는 `CLAUDE_CONFIG_DIR`, `GEMINI_HOME` 또는 `GEMINI_CLI_HOME`을 직접 지정하세요.
 
 ## 설치
 
@@ -96,10 +100,12 @@ http://127.0.0.1:3766
 처음 실행하면 앱이 현재 OS와 홈 디렉터리를 기준으로 Codex, Claude, Gemini 기록 폴더를 자동으로 찾습니다.
 
 ```txt
-1. 추천 경로와 발견된 세션 수 확인
+1. 추천 경로, 발견된 세션 수, 신뢰도 확인
 2. 필요하면 경로 직접 수정
 3. 저장 후 스캔
 ```
+
+추천 신뢰도는 세션 파일 개수만 보지 않고 각 도구의 실제 저장 구조까지 같이 봅니다. 예를 들어 Codex는 `state_5.sqlite`와 `sessions`, Claude는 `projects`/`transcripts`, Gemini는 `tmp`/`history`/`checkpoints` 신호를 함께 확인합니다.
 
 저장한 경로는 `~/.codex-session-manager/app.sqlite`에 보관됩니다. 이후에는 같은 경로를 다시 사용하며, 화면 상단의 `경로 설정` 버튼으로 언제든 변경할 수 있습니다.
 

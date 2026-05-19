@@ -17,6 +17,8 @@ export type SourceFilter = "all" | SessionSource;
 
 export type SetupCandidateStatus = "ready" | "partial" | "missing";
 
+export type SetupCandidateConfidence = "high" | "medium" | "low";
+
 export interface SourcePathInfo {
   source: SessionSource;
   label: string;
@@ -31,6 +33,7 @@ export interface SetupPathCandidate {
   source: SessionSource;
   label: string;
   status: SetupCandidateStatus;
+  confidence: SetupCandidateConfidence;
   exists: boolean;
   sessionCount: number;
   signals: string[];

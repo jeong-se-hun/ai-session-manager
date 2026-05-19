@@ -12,6 +12,7 @@ import {
 import type {
   BrowseDirectoryResponse,
   DirectoryEntry,
+  SetupCandidateConfidence,
   SessionSource,
   SetupCandidateStatus,
   SetupPathCandidate,
@@ -73,6 +74,7 @@ function buildSourceInfo(
     { path: currentPath, label: "현재 사용 중" },
     envPath ? { path: envPath, label: "환경변수" } : null,
     { path: defaultPath, label: "기본 경로" },
+    ...getOsHomeCandidates(source),
     ...getWslWindowsHomeCandidates(source, isWsl)
   ].filter((candidate): candidate is { path: string; label: string } => Boolean(candidate));
 
@@ -85,10 +87,10 @@ function buildSourceInfo(
   const candidates = [...byPath.entries()].map(([candidatePath, labels]) => inspectCandidate(source, candidatePath, labels.join(" / ")));
   const bestReady = candidates
     .filter((candidate) => candidate.status === "ready")
-    .sort((a, b) => b.sessionCount - a.sessionCount || Number(b.path === currentPath) - Number(a.path === currentPath))[0];
+    .sort(compareCandidates(currentPath))[0];
   const bestPartial = candidates
     .filter((candidate) => candidate.status === "partial")
-    .sort((a, b) => Number(b.path === currentPath) - Number(a.path === currentPath))[0];
+    .sort(compareCandidates(currentPath))[0];
   const recommendedPath = (bestReady ?? bestPartial)?.path;
 
   return {
@@ -152,20 +154,28 @@ function listDirectoryEntries(currentPath: string): DirectoryEntry[] {
 function inspectCodexCandidate(rootPath: string, label: string): SetupPathCandidate {
   const exists = fs.existsSync(rootPath);
   const statePath = path.join(rootPath, "state_5.sqlite");
+  const logsPath = path.join(rootPath, "logs_2.sqlite");
   const sessionsPath = path.join(rootPath, "sessions");
+  const historyPath = path.join(rootPath, "history.jsonl");
+  const sessionIndexPath = path.join(rootPath, "session_index.jsonl");
   const rolloutCount = countFiles(sessionsPath, (filePath) => path.basename(filePath).startsWith("rollout-") && filePath.endsWith(".jsonl"));
   const signals = [
     fs.existsSync(statePath) ? "state_5.sqlite" : "",
+    fs.existsSync(logsPath) ? "logs_2.sqlite" : "",
+    fs.existsSync(historyPath) ? "history.jsonl" : "",
+    fs.existsSync(sessionIndexPath) ? "session_index.jsonl" : "",
     fs.existsSync(sessionsPath) ? "sessions/" : "",
     rolloutCount > 0 ? `${rolloutCount.toLocaleString("ko-KR")}개 rollout 파일` : ""
   ].filter(Boolean);
-  return buildCandidate("codex", rootPath, label, exists, rolloutCount, signals);
+  return buildCandidate("codex", rootPath, label, exists, rolloutCount, signals, scoreCodexCandidate(rootPath, rolloutCount));
 }
 
 function inspectClaudeCandidate(rootPath: string, label: string): SetupPathCandidate {
   const exists = fs.existsSync(rootPath);
   const projectsPath = path.join(rootPath, "projects");
   const transcriptsPath = path.join(rootPath, "transcripts");
+  const settingsPath = path.join(rootPath, "settings.json");
+  const todosPath = path.join(rootPath, "todos");
   const transcriptCount = countFiles(transcriptsPath, (filePath) => filePath.endsWith(".jsonl"));
   const projectCount = countFiles(projectsPath, (filePath) => {
     if (!filePath.endsWith(".jsonl")) return false;
@@ -175,24 +185,36 @@ function inspectClaudeCandidate(rootPath: string, label: string): SetupPathCandi
   const signals = [
     fs.existsSync(projectsPath) ? "projects/" : "",
     fs.existsSync(transcriptsPath) ? "transcripts/" : "",
+    fs.existsSync(settingsPath) ? "settings.json" : "",
+    fs.existsSync(todosPath) ? "todos/" : "",
     sessionCount > 0 ? `${sessionCount.toLocaleString("ko-KR")}개 JSONL 세션` : ""
   ].filter(Boolean);
-  return buildCandidate("claude", rootPath, label, exists, sessionCount, signals);
+  return buildCandidate("claude", rootPath, label, exists, sessionCount, signals, scoreClaudeCandidate(rootPath, sessionCount));
 }
 
 function inspectGeminiCandidate(rootPath: string, label: string): SetupPathCandidate {
   const exists = fs.existsSync(rootPath);
   const tmpPath = path.join(rootPath, "tmp");
   const historyPath = path.join(rootPath, "history");
-  const sessionCount = countFiles(tmpPath, (filePath) => path.basename(path.dirname(filePath)) === "chats" && filePath.endsWith(".json"));
+  const settingsPath = path.join(rootPath, "settings.json");
+  const oauthPath = path.join(rootPath, "oauth_creds.json");
+  const sessionCount = countFiles(tmpPath, (filePath) => {
+    return path.basename(path.dirname(filePath)) === "chats" && (filePath.endsWith(".json") || filePath.endsWith(".jsonl"));
+  });
+  const checkpointCount = countFiles(tmpPath, (filePath) => {
+    return path.basename(path.dirname(filePath)) === "checkpoints" && filePath.endsWith(".json");
+  });
   const projectRootCount = countFiles(historyPath, (filePath) => path.basename(filePath) === ".project_root");
   const signals = [
     fs.existsSync(tmpPath) ? "tmp/" : "",
     fs.existsSync(historyPath) ? "history/" : "",
+    fs.existsSync(settingsPath) ? "settings.json" : "",
+    fs.existsSync(oauthPath) ? "oauth_creds.json" : "",
     sessionCount > 0 ? `${sessionCount.toLocaleString("ko-KR")}개 chat 파일` : "",
+    checkpointCount > 0 ? `${checkpointCount.toLocaleString("ko-KR")}개 checkpoint` : "",
     projectRootCount > 0 ? `${projectRootCount.toLocaleString("ko-KR")}개 project_root` : ""
   ].filter(Boolean);
-  return buildCandidate("gemini", rootPath, label, exists, sessionCount, signals);
+  return buildCandidate("gemini", rootPath, label, exists, sessionCount, signals, scoreGeminiCandidate(rootPath, sessionCount, checkpointCount));
 }
 
 function buildCandidate(
@@ -201,7 +223,8 @@ function buildCandidate(
   label: string,
   exists: boolean,
   sessionCount: number,
-  signals: string[]
+  signals: string[],
+  confidence: SetupCandidateConfidence
 ): SetupPathCandidate {
   const status: SetupCandidateStatus = sessionCount > 0 ? "ready" : signals.length > 0 ? "partial" : "missing";
   return {
@@ -209,12 +232,75 @@ function buildCandidate(
     source,
     label,
     status,
+    confidence,
     exists,
     sessionCount,
     signals,
     reason: getCandidateReason(status, exists, source),
     recommended: false
   };
+}
+
+function compareCandidates(currentPath: string): (a: SetupPathCandidate, b: SetupPathCandidate) => number {
+  return (a, b) => {
+    return (
+      Number(b.path === currentPath) - Number(a.path === currentPath) ||
+      getConfidenceRank(b.confidence) - getConfidenceRank(a.confidence) ||
+      b.sessionCount - a.sessionCount ||
+      b.signals.length - a.signals.length
+    );
+  };
+}
+
+function getConfidenceRank(confidence: SetupCandidateConfidence): number {
+  if (confidence === "high") return 3;
+  if (confidence === "medium") return 2;
+  return 1;
+}
+
+function scoreCodexCandidate(rootPath: string, sessionCount: number): SetupCandidateConfidence {
+  const hasState = fs.existsSync(path.join(rootPath, "state_5.sqlite"));
+  const hasSessions = fs.existsSync(path.join(rootPath, "sessions"));
+  const hasIndex = fs.existsSync(path.join(rootPath, "session_index.jsonl"));
+  if (sessionCount > 0 && (hasState || hasIndex)) return "high";
+  if (sessionCount > 0 || (hasState && hasSessions)) return "medium";
+  return "low";
+}
+
+function scoreClaudeCandidate(rootPath: string, sessionCount: number): SetupCandidateConfidence {
+  const hasProjects = fs.existsSync(path.join(rootPath, "projects"));
+  const hasSettings = fs.existsSync(path.join(rootPath, "settings.json"));
+  if (sessionCount > 0 && hasProjects) return "high";
+  if (sessionCount > 0 || (hasProjects && hasSettings)) return "medium";
+  return "low";
+}
+
+function scoreGeminiCandidate(rootPath: string, sessionCount: number, checkpointCount: number): SetupCandidateConfidence {
+  const hasTmp = fs.existsSync(path.join(rootPath, "tmp"));
+  const hasHistory = fs.existsSync(path.join(rootPath, "history"));
+  const hasSettings = fs.existsSync(path.join(rootPath, "settings.json"));
+  if (sessionCount > 0 && hasTmp) return "high";
+  if (sessionCount > 0 || checkpointCount > 0 || (hasTmp && (hasHistory || hasSettings))) return "medium";
+  return "low";
+}
+
+function getOsHomeCandidates(source: SessionSource): Array<{ path: string; label: string }> {
+  const folderName = getSourceFolderName(source);
+  const candidates: Array<{ path: string; label: string }> = [];
+  if (process.platform === "win32") {
+    for (const home of [process.env.USERPROFILE, process.env.HOME]) {
+      if (home) candidates.push({ path: path.join(home, folderName), label: "Windows 사용자 홈" });
+    }
+  } else {
+    candidates.push({ path: path.join(os.homedir(), folderName), label: process.platform === "darwin" ? "macOS 사용자 홈" : "Linux 사용자 홈" });
+  }
+  return candidates;
+}
+
+function getSourceFolderName(source: SessionSource): string {
+  if (source === "codex") return ".codex";
+  if (source === "claude") return ".claude";
+  return ".gemini";
 }
 
 function getCandidateReason(status: SetupCandidateStatus, exists: boolean, source: SessionSource): string {
@@ -263,7 +349,7 @@ function getWslWindowsHomeCandidates(source: SessionSource, isWsl: boolean): Arr
   } catch {
     return [];
   }
-  const folderName = source === "codex" ? ".codex" : source === "claude" ? ".claude" : ".gemini";
+  const folderName = getSourceFolderName(source);
   return users
     .filter((entry) => entry.isDirectory() && !["All Users", "Default", "Default User", "Public"].includes(entry.name))
     .slice(0, 8)

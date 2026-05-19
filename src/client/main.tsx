@@ -325,14 +325,36 @@ function App() {
 
   return (
     <main className="app-shell" aria-busy={Boolean(operation)}>
-      {setup && (showSetup || !setup.completed) && (
+      {setup && !setup.completed && (
+        <div className="modal-backdrop setup-modal" role="dialog" aria-modal="true" aria-label="첫 실행 기록 경로 설정">
+          <SetupPanel
+            setup={setup}
+            draft={setupDraft}
+            busy={setupBusy}
+            firstRun
+            onDraftChange={setSetupDraft}
+            onBrowse={(source) => setPickerSource(source)}
+            onUseRecommended={() => {
+              setSetupDraft(getRecommendedDraft(setup, setupDraft));
+              setNotice("추천 경로를 입력했습니다. 저장 버튼을 누르면 적용됩니다.");
+            }}
+            onSave={() => void saveSetup()}
+            onClose={() => setShowSetup(false)}
+          />
+        </div>
+      )}
+      {setup && setup.completed && showSetup && (
         <SetupPanel
           setup={setup}
           draft={setupDraft}
           busy={setupBusy}
+          firstRun={false}
           onDraftChange={setSetupDraft}
           onBrowse={(source) => setPickerSource(source)}
-          onUseRecommended={() => void saveSetup(getRecommendedDraft(setup, setupDraft))}
+          onUseRecommended={() => {
+            setSetupDraft(getRecommendedDraft(setup, setupDraft));
+            setNotice("추천 경로를 입력했습니다. 저장 버튼을 누르면 적용됩니다.");
+          }}
           onSave={() => void saveSetup()}
           onClose={() => setShowSetup(false)}
         />
@@ -653,37 +675,44 @@ function SetupPanel({
   onBrowse,
   onUseRecommended,
   onSave,
-  onClose
+  onClose,
+  firstRun
 }: {
   setup: SetupStateResponse;
   draft: SetupDraft;
   busy: boolean;
+  firstRun: boolean;
   onDraftChange: (draft: SetupDraft) => void;
   onBrowse: (source: SessionSource) => void;
   onUseRecommended: () => void;
   onSave: () => void;
   onClose: () => void;
 }) {
-  const platformLabel = `${setup.platform}${setup.isWsl ? " / WSL" : ""}`;
+  const platformLabel = getPlatformLabel(setup);
   const readyCount = sourceOptions
     .filter((option) => option.value !== "all")
     .filter((option) => setup.sources[option.value as SessionSource].candidates.some((candidate) => candidate.status === "ready")).length;
+  const recommendedDraft = getRecommendedDraft(setup, draft);
+  const hasRecommendedChange = !isSameSetupDraft(draft, recommendedDraft);
 
   return (
-    <section className="setup-panel" aria-label="첫 실행 기록 경로 설정">
+    <section className={`setup-panel ${firstRun ? "first-run" : ""}`} aria-label={firstRun ? "첫 실행 기록 경로 설정" : "기록 경로 설정"}>
       <div className="setup-heading">
         <div>
-          <strong>기록 경로 설정</strong>
+          <strong>{firstRun ? "처음 설정" : "기록 경로 설정"}</strong>
           <span>
-            {platformLabel} 환경에서 AI 기록 폴더를 찾았습니다. 자동 추천을 저장하거나 경로를 직접 입력한 뒤 다시 스캔하세요.
+            {firstRun
+              ? "OS는 직접 선택하지 않아도 됩니다. 앱이 현재 PC 환경을 먼저 확인하고, 기록 폴더 후보를 자동으로 찾습니다."
+              : "저장된 기록 경로를 확인하거나 다른 폴더로 변경할 수 있습니다."}
           </span>
         </div>
         <div className="setup-actions">
-          <button onClick={onUseRecommended} disabled={busy || readyCount === 0}>
-            <RefreshCw className={busy ? "loading-icon" : ""} size={16} /> 추천 경로 저장
+          <button onClick={onUseRecommended} disabled={busy || readyCount === 0 || !hasRecommendedChange}>
+            <RefreshCw className={busy ? "loading-icon" : ""} size={16} /> {hasRecommendedChange ? "추천 경로로 입력" : "추천 경로 입력됨"}
           </button>
           <button className="primary-button" onClick={onSave} disabled={busy}>
-            {busy ? <RefreshCw className="loading-icon" size={16} /> : <Settings size={16} />} 저장 후 스캔
+            {busy ? <RefreshCw className="loading-icon" size={16} /> : <Settings size={16} />}{" "}
+            {firstRun ? "저장하고 목록 보기" : "저장하고 다시 스캔"}
           </button>
           {setup.completed && (
             <button className="icon-button" onClick={onClose} disabled={busy} aria-label="경로 설정 닫기">
@@ -692,6 +721,19 @@ function SetupPanel({
           )}
         </div>
       </div>
+
+      {firstRun && (
+        <div className="setup-detection">
+          <div>
+            <span>현재 환경</span>
+            <strong>{platformLabel} 자동 감지됨</strong>
+          </div>
+          <p>
+            홈 디렉터리 {shortPath(setup.homeDir)} 기준으로 Codex, Claude, Gemini 기록 위치를 확인했습니다. 맞으면 바로 저장하고,
+            다르면 각 카드에서 폴더를 직접 선택하세요.
+          </p>
+        </div>
+      )}
 
       <div className="setup-grid">
         {(["codex", "claude", "gemini"] as SessionSource[]).map((source) => {
@@ -746,7 +788,10 @@ function CandidateButton({
 }) {
   return (
     <button className={`candidate-button ${candidate.status} ${active ? "selected" : ""}`} onClick={onClick}>
-      <span className="candidate-status">{getCandidateStatusLabel(candidate)}</span>
+      <span className="candidate-topline">
+        <span className="candidate-status">{getCandidateStatusLabel(candidate)}</span>
+        <span className={`candidate-confidence ${candidate.confidence}`}>{getCandidateConfidenceLabel(candidate.confidence)}</span>
+      </span>
       <span className="candidate-path">{candidate.path}</span>
       <small>{candidate.signals.length > 0 ? candidate.signals.join(" · ") : candidate.reason}</small>
     </button>
@@ -770,6 +815,10 @@ function getRecommendedDraft(setup: SetupStateResponse, fallback: SetupDraft): S
   return next;
 }
 
+function isSameSetupDraft(a: SetupDraft, b: SetupDraft): boolean {
+  return a.codexHome === b.codexHome && a.claudeHome === b.claudeHome && a.geminiHome === b.geminiHome;
+}
+
 function getHomeKey(source: SessionSource): keyof SetupDraft {
   return `${source}Home` as keyof SetupDraft;
 }
@@ -785,6 +834,20 @@ function getCandidateStatusLabel(candidate: SetupPathCandidate): string {
   if (candidate.status === "ready") return `${prefix} · ${candidate.sessionCount.toLocaleString("ko-KR")}개`;
   if (candidate.status === "partial") return `${prefix} · 구조 확인`;
   return `${prefix} · 없음`;
+}
+
+function getCandidateConfidenceLabel(confidence: SetupPathCandidate["confidence"]): string {
+  if (confidence === "high") return "신뢰도 높음";
+  if (confidence === "medium") return "신뢰도 보통";
+  return "신뢰도 낮음";
+}
+
+function getPlatformLabel(setup: SetupStateResponse): string {
+  if (setup.isWsl) return "WSL";
+  if (setup.platform === "darwin") return "macOS";
+  if (setup.platform === "win32") return "Windows";
+  if (setup.platform === "linux") return "Linux";
+  return setup.platform;
 }
 
 function FolderPicker({

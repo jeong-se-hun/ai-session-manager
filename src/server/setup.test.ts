@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const originalCodexHome = process.env.CODEX_HOME;
 const originalClaudeHome = process.env.CLAUDE_HOME;
+const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
 const originalGeminiHome = process.env.GEMINI_HOME;
+const originalGeminiCliHome = process.env.GEMINI_CLI_HOME;
 const originalAppHome = process.env.CODEX_SESSION_MANAGER_HOME;
 
 afterEach(() => {
@@ -15,8 +17,12 @@ afterEach(() => {
   else process.env.CODEX_HOME = originalCodexHome;
   if (originalClaudeHome === undefined) delete process.env.CLAUDE_HOME;
   else process.env.CLAUDE_HOME = originalClaudeHome;
+  if (originalClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+  else process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir;
   if (originalGeminiHome === undefined) delete process.env.GEMINI_HOME;
   else process.env.GEMINI_HOME = originalGeminiHome;
+  if (originalGeminiCliHome === undefined) delete process.env.GEMINI_CLI_HOME;
+  else process.env.GEMINI_CLI_HOME = originalGeminiCliHome;
   if (originalAppHome === undefined) delete process.env.CODEX_SESSION_MANAGER_HOME;
   else process.env.CODEX_SESSION_MANAGER_HOME = originalAppHome;
 });
@@ -43,16 +49,19 @@ describe("setup path discovery", () => {
     expect(state.completed).toBe(false);
     expect(state.sources.codex.candidates.find((candidate) => candidate.path === codexHome)).toMatchObject({
       status: "ready",
+      confidence: "high",
       sessionCount: 1,
       recommended: true
     });
     expect(state.sources.claude.candidates.find((candidate) => candidate.path === claudeHome)).toMatchObject({
       status: "ready",
+      confidence: "medium",
       sessionCount: 1,
       recommended: true
     });
     expect(state.sources.gemini.candidates.find((candidate) => candidate.path === geminiHome)).toMatchObject({
       status: "ready",
+      confidence: "high",
       sessionCount: 1,
       recommended: true
     });
@@ -108,6 +117,61 @@ describe("setup path discovery", () => {
       "gemini:proj:chats:session-selected",
       "selected-thread"
     ]);
+  });
+
+  it("uses Claude and Gemini CLI config env vars when direct home env vars are absent", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "setup-env-"));
+    const app = fs.mkdtempSync(path.join(os.tmpdir(), "setup-app-"));
+    const codexHome = path.join(root, "codex");
+    const claudeHome = path.join(root, "claude-config");
+    const geminiHome = path.join(root, "gemini-cli");
+    createCodexFixture(codexHome, "env-thread");
+    createClaudeFixture(claudeHome, "env_claude");
+    createGeminiFixture(geminiHome, "env-gemini");
+    process.env.CODEX_HOME = codexHome;
+    delete process.env.CLAUDE_HOME;
+    process.env.CLAUDE_CONFIG_DIR = claudeHome;
+    delete process.env.GEMINI_HOME;
+    process.env.GEMINI_CLI_HOME = geminiHome;
+    process.env.CODEX_SESSION_MANAGER_HOME = app;
+    vi.resetModules();
+
+    const { getSetupState } = await import("./setup");
+    const state = getSetupState();
+
+    expect(state.sources.claude.envPath).toBe(claudeHome);
+    expect(state.sources.gemini.envPath).toBe(geminiHome);
+    expect(state.sources.claude.candidates.find((candidate) => candidate.path === claudeHome)).toMatchObject({
+      status: "ready",
+      recommended: true
+    });
+    expect(state.sources.gemini.candidates.find((candidate) => candidate.path === geminiHome)).toMatchObject({
+      status: "ready",
+      recommended: true
+    });
+  });
+
+  it("lists Gemini JSONL chat files as sessions", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "setup-gemini-jsonl-"));
+    const app = fs.mkdtempSync(path.join(os.tmpdir(), "setup-app-"));
+    const geminiHome = path.join(root, "gemini");
+    process.env.CODEX_HOME = path.join(root, "codex");
+    process.env.CLAUDE_HOME = path.join(root, "claude");
+    process.env.GEMINI_HOME = geminiHome;
+    process.env.CODEX_SESSION_MANAGER_HOME = app;
+    createGeminiJsonlFixture(geminiHome);
+    vi.resetModules();
+
+    const scanner = await import("./scanner");
+    const list = await scanner.listSessions({ source: "gemini", trash: "all", archive: "all" });
+
+    expect(list.totals.sources.gemini.all).toBe(1);
+    expect(list.sessions[0]).toMatchObject({
+      id: "gemini:proj:chats:session-jsonl",
+      title: "Gemini JSONL 테스트",
+      firstUserMessage: "Gemini JSONL 테스트",
+      tokensUsed: 5
+    });
   });
 });
 
@@ -178,6 +242,32 @@ function createGeminiFixture(root: string, _nativeId: string): void {
       lastUpdated: "2026-01-01T00:00:01.000Z",
       messages: [{ type: "user", timestamp: "2026-01-01T00:00:00.000Z", content: [{ text: "Gemini 설정 테스트" }] }]
     }),
+    "utf8"
+  );
+}
+
+function createGeminiJsonlFixture(root: string): void {
+  const markerDir = path.join(root, "history", "proj");
+  const chatDir = path.join(root, "tmp", "proj", "chats");
+  fs.mkdirSync(markerDir, { recursive: true });
+  fs.mkdirSync(chatDir, { recursive: true });
+  fs.writeFileSync(path.join(markerDir, ".project_root"), "/tmp/setup-gemini-jsonl", "utf8");
+  fs.writeFileSync(
+    path.join(chatDir, "session-jsonl.jsonl"),
+    [
+      JSON.stringify({
+        sessionId: "session-jsonl",
+        type: "user",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        content: [{ text: "Gemini JSONL 테스트" }]
+      }),
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-01-01T00:00:01.000Z",
+        content: [{ text: "완료" }],
+        usage: { promptTokenCount: 2, candidatesTokenCount: 3 }
+      })
+    ].join("\n") + "\n",
     "utf8"
   );
 }

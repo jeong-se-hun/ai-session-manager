@@ -180,6 +180,41 @@ h2 {
   line-height: 1.5;
 }
 
+.setup-detection {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid #dbe4ef;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.setup-detection > div {
+  display: grid;
+  gap: 3px;
+}
+
+.setup-detection span {
+  color: #66758a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.setup-detection strong {
+  color: #132033;
+  font-size: 16px;
+}
+
+.setup-detection p {
+  margin: 0;
+  color: #586678;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .setup-actions {
   display: flex;
   align-items: center;
@@ -293,10 +328,53 @@ h2 {
   box-shadow: 0 0 0 3px rgb(37 99 235 / 12%);
 }
 
+.candidate-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
 .candidate-status {
+  min-width: 0;
+  overflow: hidden;
   color: #273244;
   font-size: 12px;
   font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-confidence {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid #d7e0eb;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 10px;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.candidate-confidence.high {
+  border-color: #badbcc;
+  background: #effaf3;
+  color: #166534;
+}
+
+.candidate-confidence.medium {
+  border-color: #f3d39b;
+  background: #fff8eb;
+  color: #92400e;
+}
+
+.candidate-confidence.low {
+  border-color: #e2e8f0;
+  background: #f8fafc;
+  color: #64748b;
 }
 
 .candidate-path {
@@ -324,6 +402,24 @@ h2 {
   place-items: center;
   padding: 20px;
   background: rgb(15 23 42 / 38%);
+}
+
+.setup-modal {
+  align-items: start;
+  overflow: auto;
+}
+
+.setup-modal .setup-panel {
+  width: min(1120px, 100%);
+  max-height: calc(100vh - 40px);
+  margin: 0;
+  overflow: auto;
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgb(15 23 42 / 28%);
+}
+
+.setup-panel.first-run {
+  padding: 20px;
 }
 
 .folder-picker {
@@ -1481,6 +1577,10 @@ tbody tr.active-row:hover td {
   .folder-picker-actions {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .setup-detection {
+    grid-template-columns: 1fr;
   }
 
   .setup-actions button,

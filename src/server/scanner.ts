@@ -268,19 +268,19 @@ function listGeminiSessions(
   const { geminiTmpRoot } = getStoragePaths();
   const files = collectFiles(
     geminiTmpRoot,
-    (filePath, entry) => entry.isFile() && path.basename(path.dirname(filePath)) === "chats" && filePath.endsWith(".json")
+    (filePath, entry) =>
+      entry.isFile() && path.basename(path.dirname(filePath)) === "chats" && (filePath.endsWith(".json") || filePath.endsWith(".jsonl"))
   );
 
   return files.flatMap((filePath) => {
     const stat = safeStat(filePath);
-    const raw = safeReadJson(filePath);
-    if (!stat || !isRecord(raw)) return [];
+    const conversation = readGeminiConversation(filePath);
+    if (!stat || !conversation) return [];
 
     const projectKey = getGeminiProjectKey(filePath);
-    const sessionId = typeof raw.sessionId === "string" ? raw.sessionId : path.basename(filePath, ".json");
+    const sessionId = typeof conversation.raw.sessionId === "string" ? conversation.raw.sessionId : getSessionFileBaseName(filePath);
     const id = `gemini:${getGeminiFileKey(filePath)}`;
-    const messages = Array.isArray(raw.messages) ? raw.messages.filter(isRecord) : [];
-    const meta = readGeminiSessionMeta(raw, messages, stat);
+    const meta = readGeminiSessionMeta(conversation.raw, conversation.messages, stat);
     const trashRecord = trash.get(id);
 
     return [
@@ -543,18 +543,17 @@ async function parseClaudeDetail(filePath: string): Promise<{ items: DetailItem[
 }
 
 function parseGeminiDetail(filePath: string): { items: DetailItem[]; rawLineCount: number } {
-  const raw = safeReadJson(filePath);
-  if (!isRecord(raw)) return { items: [], rawLineCount: 0 };
-  const messages = Array.isArray(raw.messages) ? raw.messages.filter(isRecord) : [];
+  const conversation = readGeminiConversation(filePath);
+  if (!conversation) return { items: [], rawLineCount: 0 };
   const items: DetailItem[] = [];
 
-  messages.forEach((message, index) => {
-    const type = typeof message.type === "string" ? message.type : "";
+  conversation.messages.forEach((message, index) => {
+    const type = getGeminiMessageType(message);
     const timestamp = typeof message.timestamp === "string" ? message.timestamp : null;
-    const text = extractAnyText(message.content);
+    const text = extractGeminiMessageText(message);
     if (type === "user" && text) {
       items.push({ id: `${index}`, kind: "user", label: "사용자", text, timestamp });
-    } else if ((type === "gemini" || type === "assistant") && text) {
+    } else if ((type === "gemini" || type === "assistant" || type === "model") && text) {
       items.push({ id: `${index}`, kind: "assistant", label: "Gemini", text, timestamp });
     }
 
@@ -584,7 +583,7 @@ function parseGeminiDetail(filePath: string): { items: DetailItem[]; rawLineCoun
     }
   });
 
-  return { items, rawLineCount: messages.length };
+  return { items, rawLineCount: conversation.rawLineCount };
 }
 
 async function readClaudeSessionMeta(filePath: string, stat: fs.Stats): Promise<{
@@ -674,13 +673,15 @@ function readGeminiSessionMeta(
 
   for (const message of messages) {
     if (typeof message.model === "string") model = message.model;
+    if (!model && typeof message.modelVersion === "string") model = message.modelVersion;
     tokensUsed += extractTokenTotal(message.tokens);
+    tokensUsed += extractTokenTotal(message.usage);
     updateTimestampBounds(message.timestamp, (next) => {
       firstTimestampMs = firstTimestampMs === null ? next : Math.min(firstTimestampMs, next);
       lastTimestampMs = lastTimestampMs === null ? next : Math.max(lastTimestampMs, next);
     });
-    if (message.type === "user") {
-      const text = extractAnyText(message.content);
+    if (getGeminiMessageType(message) === "user") {
+      const text = extractGeminiMessageText(message);
       if (text) {
         if (!firstUserMessage) firstUserMessage = truncateText(text, 240);
         lastUserMessage = truncateText(text, 240);
@@ -697,6 +698,84 @@ function readGeminiSessionMeta(
     createdAt: toIsoFromMillis(firstTimestampMs) ?? stat.birthtime.toISOString(),
     updatedAt: toIsoFromMillis(lastTimestampMs) ?? stat.mtime.toISOString()
   };
+}
+
+function readGeminiConversation(filePath: string): {
+  raw: Record<string, unknown>;
+  messages: Record<string, unknown>[];
+  rawLineCount: number;
+} | null {
+  if (filePath.endsWith(".jsonl")) return readGeminiJsonlConversation(filePath);
+  const raw = safeReadJson(filePath);
+  if (!isRecord(raw)) return null;
+  const messages = Array.isArray(raw.messages) ? raw.messages.filter(isRecord) : [];
+  return { raw, messages, rawLineCount: messages.length };
+}
+
+function readGeminiJsonlConversation(filePath: string): {
+  raw: Record<string, unknown>;
+  messages: Record<string, unknown>[];
+  rawLineCount: number;
+} | null {
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/).filter((line) => line.trim().length > 0);
+  } catch {
+    return null;
+  }
+
+  const raw: Record<string, unknown> = {};
+  const messages: Record<string, unknown>[] = [];
+  for (const line of lines) {
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(value)) continue;
+    mergeGeminiSessionFields(raw, value);
+    if (Array.isArray(value.messages)) {
+      messages.push(...value.messages.filter(isRecord));
+      continue;
+    }
+    if (looksLikeGeminiMessage(value)) messages.push(value);
+  }
+
+  return { raw, messages, rawLineCount: lines.length };
+}
+
+function mergeGeminiSessionFields(target: Record<string, unknown>, value: Record<string, unknown>): void {
+  for (const key of ["sessionId", "model", "modelVersion", "startTime"] as const) {
+    if (target[key] === undefined && value[key] !== undefined) target[key] = value[key];
+  }
+  if (value.lastUpdated !== undefined) target.lastUpdated = value.lastUpdated;
+  if (target.startTime === undefined && value.timestamp !== undefined) target.startTime = value.timestamp;
+  if (value.timestamp !== undefined) target.lastUpdated = value.timestamp;
+}
+
+function looksLikeGeminiMessage(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.type === "string" ||
+    typeof value.role === "string" ||
+    value.content !== undefined ||
+    value.parts !== undefined ||
+    value.text !== undefined ||
+    value.usage !== undefined ||
+    value.tokens !== undefined
+  );
+}
+
+function getGeminiMessageType(message: Record<string, unknown>): string {
+  const explicit = typeof message.type === "string" ? message.type : "";
+  const role = typeof message.role === "string" ? message.role : "";
+  if (explicit === "user" || role === "user") return "user";
+  if (explicit === "gemini" || explicit === "assistant" || explicit === "model" || role === "model" || role === "assistant") return explicit || role;
+  return explicit || role;
+}
+
+function extractGeminiMessageText(message: Record<string, unknown>): string {
+  return extractAnyText(message.content) || extractAnyText(message.parts) || extractAnyText(message.text);
 }
 
 function readGeminiProjectRoots(): Map<string, string> {
@@ -818,11 +897,15 @@ function getGeminiProjectKey(filePath: string): string {
 
 function getGeminiFileKey(filePath: string): string {
   const { geminiTmpRoot } = getStoragePaths();
-  const withoutExtension = path.relative(geminiTmpRoot, filePath).replace(/\.json$/, "");
+  const withoutExtension = path.relative(geminiTmpRoot, filePath).replace(/\.jsonl?$/, "");
   return withoutExtension
     .split(path.sep)
     .map((part) => part.replace(/[^a-zA-Z0-9._-]/g, "_"))
     .join(":");
+}
+
+function getSessionFileBaseName(filePath: string): string {
+  return path.basename(filePath).replace(/\.jsonl?$/, "");
 }
 
 function getClaudeSessionId(filePath: string): string {
