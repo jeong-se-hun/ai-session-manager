@@ -6,7 +6,10 @@ import type { TrashRecord } from "./appDb";
 import { listSessions, openStateDb } from "./scanner";
 import {
   backupRoot,
+  claudeHome,
+  claudeProjectsRoot,
   codexHome,
+  geminiTmpRoot,
   historyPath,
   isInside,
   logsDbPath,
@@ -15,12 +18,12 @@ import {
   stateDbPath,
   trashRoot
 } from "./paths";
-import type { TrashResult } from "../shared/types";
+import type { SessionSource, TrashResult } from "../shared/types";
 
 const RECENT_GUARD_MS = 30 * 60 * 1000;
 
 export async function trashSessions(sessionIds: string[]): Promise<TrashResult[]> {
-  const list = await listSessions({ archive: "all", trash: "all", limit: 10000 });
+  const list = await listSessions({ archive: "all", trash: "all", limit: 100000 });
   const byId = new Map(list.sessions.map((session) => [session.id, session]));
   const appDb = getAppDb();
   const insert = appDb.prepare(
@@ -45,18 +48,21 @@ export async function trashSessions(sessionIds: string[]): Promise<TrashResult[]
     }
 
     const deletedAt = new Date().toISOString();
-    const trashDir = path.join(trashRoot, `${deletedAt.replace(/[:.]/g, "-")}-${sessionId}`);
+    const trashDir = path.join(trashRoot, `${deletedAt.replace(/[:.]/g, "-")}-${safeFileName(sessionId)}`);
     const manifestPath = path.join(trashDir, "manifest.json");
     fs.mkdirSync(trashDir, { recursive: true });
 
-    if (session.fileExists && isInside(sessionsRoot, session.rolloutPath)) {
+    const sourceRoot = getSourceFileRoot(session.source);
+    if (session.fileExists && isInside(sourceRoot, session.rolloutPath)) {
       fs.copyFileSync(session.rolloutPath, path.join(trashDir, path.basename(session.rolloutPath)));
     }
+    copyRelatedSessionPaths(session.source, session.rolloutPath, trashDir);
 
     const manifest = {
       session,
       deletedAt,
-      note: "삭제 대기 단계는 원본 Codex 데이터를 삭제하지 않고 복구용 사본과 앱 상태만 기록합니다."
+      relatedPaths: getRelatedSessionPaths(session.source, session.rolloutPath),
+      note: "삭제 대기 단계는 원본 AI 기록 파일을 삭제하지 않고 복구용 사본과 앱 상태만 기록합니다."
     };
     fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
     insert.run(session.id, session.title, session.rolloutPath, trashDir, manifestPath, deletedAt);
@@ -77,6 +83,14 @@ export function restoreSessions(sessionIds: string[]): TrashResult[] {
 }
 
 export async function setArchived(sessionIds: string[], archived: boolean): Promise<TrashResult[]> {
+  const list = await listSessions({ archive: "all", trash: "all", source: "all", limit: 100000 });
+  const byId = new Map(list.sessions.map((session) => [session.id, session]));
+  const codexIds = sessionIds.filter((id) => byId.get(id)?.source === "codex" || (!byId.has(id) && inferSourceFromSessionId(id) === "codex"));
+  const skipped = sessionIds
+    .filter((id) => !codexIds.includes(id))
+    .map<TrashResult>((id) => ({ sessionId: id, status: "skipped", reason: "보관 처리는 Codex 세션만 지원합니다." }));
+  if (codexIds.length === 0) return skipped;
+
   createBackup("archive");
   const db = openStateDb(false);
   try {
@@ -90,17 +104,18 @@ export async function setArchived(sessionIds: string[], archived: boolean): Prom
           : { sessionId: id, status: "skipped", reason: "Codex 목록 저장소에서 세션을 찾을 수 없습니다." };
       });
     });
-    return tx(sessionIds) as TrashResult[];
+    return [...(tx(codexIds) as TrashResult[]), ...skipped];
   } finally {
     db.close();
   }
 }
 
 export async function permanentlyDeleteSessions(sessionIds: string[]): Promise<TrashResult[]> {
-  const list = await listSessions({ archive: "all", trash: "all", limit: 10000 });
+  const list = await listSessions({ archive: "all", trash: "all", source: "all", limit: 100000 });
   const byId = new Map(list.sessions.map((session) => [session.id, session]));
-  const stateDb = openStateDb(false);
-  const logsDb = fs.existsSync(logsDbPath) ? new Database(logsDbPath) : null;
+  const hasCodexTarget = sessionIds.some((id) => byId.get(id)?.source === "codex" || (!byId.has(id) && inferSourceFromSessionId(id) === "codex"));
+  const stateDb = hasCodexTarget ? openStateDb(false) : null;
+  const logsDb = hasCodexTarget && fs.existsSync(logsDbPath) ? new Database(logsDbPath) : null;
   const appDb = getAppDb();
   const trashStmt = appDb.prepare("SELECT * FROM trash_items WHERE session_id = ?");
 
@@ -109,34 +124,73 @@ export async function permanentlyDeleteSessions(sessionIds: string[]): Promise<T
       const session = byId.get(sessionId);
       const trashRecord = trashStmt.get(sessionId) as TrashRecord | undefined;
       const rolloutPath = session?.rolloutPath || trashRecord?.original_rollout_path || "";
+      const source = session?.source ?? inferSourceFromSessionId(sessionId);
       if (!session && !trashRecord) return { sessionId, status: "skipped", reason: "세션을 찾을 수 없습니다." };
       if (session && Date.now() - Date.parse(session.updatedAt) < RECENT_GUARD_MS) {
         return { sessionId, status: "skipped", reason: "최근 30분 내 갱신되어 실행 중일 수 있습니다." };
       }
-      if (rolloutPath && !isInside(sessionsRoot, rolloutPath)) {
-        return { sessionId, status: "skipped", reason: "세션 파일 경로가 Codex sessions 폴더 밖입니다." };
+      if (rolloutPath && !isInside(getSourceFileRoot(source), rolloutPath)) {
+        return { sessionId, status: "skipped", reason: "세션 파일 경로가 해당 AI 기록 폴더 밖입니다." };
       }
 
-      deleteThreadState(stateDb, sessionId);
-      if (logsDb && tableExists(logsDb, "logs")) {
-        prepareSqliteForHardDelete(logsDb);
-        logsDb.prepare("DELETE FROM logs WHERE thread_id = ?").run(sessionId);
+      if (source === "codex") {
+        if (!stateDb) return { sessionId, status: "skipped", reason: "Codex 목록 저장소를 열 수 없습니다." };
+        deleteThreadState(stateDb, sessionId);
+        if (logsDb && tableExists(logsDb, "logs")) {
+          prepareSqliteForHardDelete(logsDb);
+          logsDb.prepare("DELETE FROM logs WHERE thread_id = ?").run(sessionId);
+        }
+        rewriteJsonlWithoutSession(historyPath, "session_id", sessionId);
+        rewriteJsonlWithoutSession(sessionIndexPath, "id", sessionId);
+        scrubSessionFromBackups(sessionId);
       }
-      rewriteJsonlWithoutSession(historyPath, "session_id", sessionId);
-      rewriteJsonlWithoutSession(sessionIndexPath, "id", sessionId);
 
+      for (const relatedPath of getRelatedSessionPaths(source, rolloutPath)) {
+        if (fs.existsSync(relatedPath)) fs.rmSync(relatedPath, { recursive: true, force: true });
+      }
       if (rolloutPath && fs.existsSync(rolloutPath)) fs.rmSync(rolloutPath, { force: true });
 
       deleteAppState(appDb, sessionId, trashRecord);
-      scrubSessionFromBackups(sessionId);
       return { sessionId, status: "deleted" };
     });
-    compactSqliteAfterHardDelete(stateDb);
+    if (stateDb) compactSqliteAfterHardDelete(stateDb);
     if (logsDb) compactSqliteAfterHardDelete(logsDb);
     return results;
   } finally {
-    stateDb.close();
+    stateDb?.close();
     logsDb?.close();
+  }
+}
+
+function getSourceFileRoot(source: SessionSource): string {
+  if (source === "claude") return claudeHome;
+  if (source === "gemini") return geminiTmpRoot;
+  return sessionsRoot;
+}
+
+function inferSourceFromSessionId(sessionId: string): SessionSource {
+  if (sessionId.startsWith("claude:")) return "claude";
+  if (sessionId.startsWith("gemini:")) return "gemini";
+  return "codex";
+}
+
+function safeFileName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._:-]/g, "_");
+}
+
+function getRelatedSessionPaths(source: SessionSource, rolloutPath: string): string[] {
+  if (source !== "claude" || !rolloutPath) return [];
+  if (!isInside(claudeProjectsRoot, rolloutPath)) return [];
+  if (path.dirname(path.dirname(rolloutPath)) !== claudeProjectsRoot) return [];
+  const relatedDir = path.join(path.dirname(rolloutPath), path.basename(rolloutPath, ".jsonl"));
+  return fs.existsSync(relatedDir) && isInside(claudeHome, relatedDir) ? [relatedDir] : [];
+}
+
+function copyRelatedSessionPaths(source: SessionSource, rolloutPath: string, trashDir: string): void {
+  const relatedRoot = path.join(trashDir, "related");
+  for (const relatedPath of getRelatedSessionPaths(source, rolloutPath)) {
+    fs.mkdirSync(relatedRoot, { recursive: true });
+    fs.cpSync(relatedPath, path.join(relatedRoot, path.basename(relatedPath)), { recursive: true });
   }
 }
 

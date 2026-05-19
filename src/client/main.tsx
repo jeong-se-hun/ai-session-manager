@@ -1,16 +1,16 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { createRoot } from "react-dom/client";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import {
   ArrowDown,
   ArrowDownUp,
   ArrowUp,
   CheckSquare,
   Eye,
-  Filter,
+  FolderOpen,
+  ListFilter,
   RefreshCw,
   RotateCcw,
   Search,
-  ShieldAlert,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -19,15 +19,24 @@ import {
 import type {
   ArchiveFilter,
   DetailItem,
-  DoctorIssue,
-  DoctorResponse,
   SessionDetailResponse,
   SessionListResponse,
   SessionSummaryRow,
+  SessionSource,
+  SourceFilter,
   SortKey,
   TrashFilter
 } from "../shared/types";
+import anthropicIcon from "./assets/brand-icons/anthropic.svg";
+import geminiIcon from "./assets/brand-icons/googlegemini.svg";
+import openAiIcon from "./assets/brand-icons/openai.svg";
 import "./styles.css";
+
+declare global {
+  interface Window {
+    __codexSessionManagerRoot?: Root;
+  }
+}
 
 const api = {
   async list(filters: FilterState): Promise<SessionListResponse> {
@@ -39,13 +48,17 @@ const api = {
     return readResponse(response);
   },
   async detail(id: string): Promise<SessionDetailResponse> {
-    return readResponse(await fetch(`/api/sessions/${id}`));
+    const params = new URLSearchParams({ id });
+    return readResponse(await fetch(`/api/session-detail?${params.toString()}`));
   },
   async summary(id: string): Promise<{ summary: string }> {
-    return readResponse(await fetch(`/api/sessions/${id}/summary`, { method: "POST" }));
-  },
-  async doctor(): Promise<DoctorResponse> {
-    return readResponse(await fetch("/api/doctor"));
+    return readResponse(
+      await fetch("/api/session-summary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: id })
+      })
+    );
   },
   async post(path: string, body: unknown): Promise<{ results: Array<{ sessionId: string; status: string; reason?: string }> }> {
     return readResponse(
@@ -60,6 +73,7 @@ const api = {
 
 interface FilterState {
   search: string;
+  source: SourceFilter;
   cwd: string;
   from: string;
   to: string;
@@ -79,13 +93,43 @@ type ProgressHandler = (done: number) => void;
 
 const defaultFilters: FilterState = {
   search: "",
+  source: "all",
   cwd: "",
   from: "",
   to: "",
   archive: "active",
   trash: "normal",
   sort: "updatedDesc",
-  limit: 500
+  limit: 100000
+};
+
+const sourceOptions: Array<{
+  value: SourceFilter;
+  label: string;
+  caption?: string;
+  icon?: string;
+  Icon?: typeof SlidersHorizontal;
+}> = [
+  { value: "all", label: "전체", Icon: SlidersHorizontal },
+  { value: "codex", label: "Codex", caption: "OpenAI", icon: openAiIcon },
+  { value: "claude", label: "Claude", caption: "Anthropic", icon: anthropicIcon },
+  { value: "gemini", label: "Gemini", caption: "Google", icon: geminiIcon }
+];
+
+const sourceLabel: Record<SessionSource, string> = {
+  codex: "Codex",
+  claude: "Claude",
+  gemini: "Gemini"
+};
+
+const sortLabel: Record<SortKey, string> = {
+  updatedDesc: "마지막 대화 최신순",
+  updatedAsc: "마지막 대화 오래된순",
+  createdDesc: "생성 최신순",
+  tokensDesc: "토큰 많은순",
+  tokensAsc: "토큰 적은순",
+  sizeDesc: "크기 큰순",
+  sizeAsc: "크기 작은순"
 };
 
 function App() {
@@ -94,57 +138,86 @@ function App() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [activeId, setActiveId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SessionDetailResponse | null>(null);
-  const [doctor, setDoctor] = useState<DoctorResponse | null>(null);
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [operation, setOperation] = useState<OperationState | null>(null);
+  const [summarizingSessionId, setSummarizingSessionId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string>("");
+  const refreshSeq = useRef(0);
+  const didInitialRefresh = useRef(false);
   const busy = operation?.label ?? null;
 
   async function refresh(nextFilters = filters) {
+    const requestId = ++refreshSeq.current;
     setLoading(true);
     try {
-      const response = await api.list(nextFilters);
+      let effectiveFilters = nextFilters;
+      let response = await api.list(effectiveFilters);
+      if (effectiveFilters.cwd && !response.projects.includes(effectiveFilters.cwd)) {
+        effectiveFilters = { ...effectiveFilters, cwd: "" };
+        setFilters(effectiveFilters);
+        response = await api.list(effectiveFilters);
+      }
+      if (requestId !== refreshSeq.current) return;
       setData(response);
       setSelected((prev) => new Set([...prev].filter((id) => response.sessions.some((session) => session.id === id))));
+      if (activeId && !response.sessions.some((session) => session.id === activeId)) {
+        setActiveId(null);
+        setDetail(null);
+        setDetailError("");
+        setDetailLoading(false);
+      }
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "목록을 불러오지 못했습니다.");
+      if (requestId === refreshSeq.current) setNotice(error instanceof Error ? error.message : "목록을 불러오지 못했습니다.");
     } finally {
-      setLoading(false);
-    }
-  }
-
-  async function refreshDoctor() {
-    try {
-      setDoctor(await api.doctor());
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "진단을 불러오지 못했습니다.");
+      if (requestId === refreshSeq.current) setLoading(false);
     }
   }
 
   async function refreshAll() {
     const nextFilters = { ...filters, cwd: "" };
     setFilters(nextFilters);
-    await Promise.all([refresh(nextFilters), refreshDoctor()]);
+    await refresh(nextFilters);
   }
 
   useEffect(() => {
-    void refresh();
-    void refreshDoctor();
-  }, []);
-
-  useEffect(() => {
+    if (!didInitialRefresh.current) {
+      didInitialRefresh.current = true;
+      void refresh(filters);
+      return;
+    }
     const timer = window.setTimeout(() => void refresh(filters), 250);
     return () => window.clearTimeout(timer);
   }, [filters]);
 
   useEffect(() => {
     if (!activeId) return;
+    let canceled = false;
+    setDetailLoading(true);
+    setDetail(null);
+    setDetailError("");
     api
       .detail(activeId)
-      .then(setDetail)
-      .catch((error) => setNotice(error instanceof Error ? error.message : "상세를 불러오지 못했습니다."));
+      .then((response) => {
+        if (!canceled) setDetail(response);
+      })
+      .catch((error) => {
+        if (!canceled) setDetailError(error instanceof Error ? error.message : "상세를 불러오지 못했습니다.");
+      })
+      .finally(() => {
+        if (!canceled) setDetailLoading(false);
+      });
+    return () => {
+      canceled = true;
+    };
   }, [activeId]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(""), 4200);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   const selectedRows = useMemo(
     () => data?.sessions.filter((session) => selected.has(session.id)) ?? [],
@@ -154,9 +227,10 @@ function App() {
   async function runBulk(
     label: string,
     action: (onProgress: ProgressHandler) => Promise<unknown>,
-    options: { closeDetail?: boolean; preserveSelection?: boolean; resetProject?: boolean; total?: number | null } = {}
+    options: { closeDetail?: boolean; preserveSelection?: boolean; resetProject?: boolean; total?: number | null; sessionId?: string } = {}
   ) {
     setOperation({ label, total: options.total ?? null, done: 0 });
+    if (label === "요약") setSummarizingSessionId(options.sessionId ?? null);
     try {
       const result = await action((done) => {
         setOperation((current) => (current?.label === label ? { ...current, done } : current));
@@ -169,10 +243,10 @@ function App() {
       const nextFilters = options.resetProject && filters.cwd ? { ...filters, cwd: "" } : filters;
       if (nextFilters !== filters) setFilters(nextFilters);
       await refresh(nextFilters);
-      await refreshDoctor();
       if (options.closeDetail) {
         setActiveId(null);
         setDetail(null);
+        setDetailError("");
       } else if (activeId) {
         setDetail(await api.detail(activeId));
       }
@@ -180,6 +254,7 @@ function App() {
       setNotice(error instanceof Error ? error.message : `${label} 작업에 실패했습니다.`);
     } finally {
       setOperation(null);
+      if (label === "요약") setSummarizingSessionId(null);
     }
   }
 
@@ -191,26 +266,35 @@ function App() {
 
   return (
     <main className="app-shell" aria-busy={Boolean(operation)}>
-      <section className="topbar" aria-labelledby="page-title">
-        <div>
-          <h1 id="page-title">Codex 세션 관리자</h1>
-          <p className="subtitle">
-            {data
-              ? `전체 ${data.totals.all.toLocaleString("ko-KR")}개 · 삭제 대기 ${data.totals.trashed.toLocaleString("ko-KR")}개 · 누락 ${data.totals.missingFiles.toLocaleString("ko-KR")}개`
-              : "Codex 세션을 불러오는 중입니다."}
-          </p>
-        </div>
-        <div className="top-actions">
-          <button className="secondary-button inline" onClick={() => setShowAdvanced((value) => !value)}>
-            <SlidersHorizontal size={18} /> 고급
-          </button>
-          <button className="primary-button" onClick={() => void refreshAll()} disabled={loading} aria-label="세션 목록과 기록 상태 새로고침">
-            <RefreshCw size={18} /> 새로고침
-          </button>
-        </div>
-      </section>
-
       <section className="command-panel" aria-label="세션 검색과 보기 전환">
+        <section className="platform-panel" aria-label="도구 선택">
+          <div className="source-tabs" role="tablist" aria-label="AI 도구 선택">
+            {sourceOptions.map(({ value, label, caption, icon, Icon }) => {
+              const selectedSource = filters.source === value;
+              const total = value === "all" ? data?.totals.all : data?.totals.sources[value as SessionSource].all;
+              return (
+                <button
+                  key={value}
+                  className={selectedSource ? "selected" : ""}
+                  aria-label={`${label} 세션 보기`}
+                  onClick={() => setFilters({ ...filters, source: value, cwd: "" })}
+                >
+                  <span className="source-icon" aria-hidden="true">
+                    {icon ? <img src={icon} alt="" /> : Icon ? <Icon size={17} /> : null}
+                  </span>
+                  <span className="source-copy">
+                    <strong>{label}</strong>
+                    {caption ? <small>{caption}</small> : null}
+                  </span>
+                  <span className="source-count" aria-label={`${(total ?? 0).toLocaleString("ko-KR")}개`}>
+                    {(total ?? 0).toLocaleString("ko-KR")}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+
         <div className="search-row">
           <label className="search-label">
             <span>검색</span>
@@ -223,123 +307,95 @@ function App() {
               />
             </span>
           </label>
-          <label className="project-label">
-            <span>프로젝트</span>
-            <select value={filters.cwd} onChange={(event) => setFilters({ ...filters, cwd: event.target.value })}>
-              <option value="">전체 프로젝트</option>
-              {(data?.projects ?? []).map((project) => (
-                <option key={project} value={project}>
-                  {project}
-                </option>
-              ))}
-            </select>
+          <label className="select-filter project-label">
+            <span className="filter-title">
+              <FolderOpen size={15} /> 프로젝트
+            </span>
+            <span className="select-shell">
+              <select value={filters.cwd} onChange={(event) => setFilters({ ...filters, cwd: event.target.value })}>
+                <option value="">전체 프로젝트</option>
+                {(data?.projects ?? []).map((project) => (
+                  <option key={project} value={project}>
+                    {project}
+                  </option>
+                ))}
+              </select>
+            </span>
           </label>
-        </div>
-
-        <div className="view-tabs" role="tablist" aria-label="세션 상태">
-          <button
-            aria-label="전체 보기"
-            className={currentView === "all" ? "selected" : ""}
-            onClick={() => setView("all", filters, setFilters)}
-          >
-            전체
-            <small>삭제 대기 포함</small>
-          </button>
-          <button
-            aria-label="활성 보기"
-            className={currentView === "active" ? "selected" : ""}
-            onClick={() => setView("active", filters, setFilters)}
-          >
-            활성
-            <small>정리 전 기본 목록</small>
-          </button>
-          <button
-            aria-label="삭제 대기 보기"
-            className={currentView === "trash" ? "selected" : ""}
-            onClick={() => setView("trash", filters, setFilters)}
-          >
-            삭제 대기
-            <small>복구 또는 삭제</small>
-          </button>
-        </div>
-
-        <div className="delete-help">
-          <strong>삭제 방식</strong>
-          <span>삭제 대기로 보내면 복구할 수 있고, 삭제를 누르면 바로 실제 Codex 기록이 삭제됩니다.</span>
-        </div>
-
-        {showAdvanced && (
-          <div className="advanced-panel">
-            <div className="advanced-group">
-              <span className="advanced-label">기간</span>
-              <div className="segmented">
-                <button className={!filters.from && !filters.to ? "selected" : ""} onClick={() => setPeriod("all", filters, setFilters)}>
-                  전체 기간
-                </button>
-                <button className={isPeriod(filters, 7) ? "selected" : ""} onClick={() => setPeriod("7", filters, setFilters)}>
-                  최근 7일
-                </button>
-                <button className={isPeriod(filters, 30) ? "selected" : ""} onClick={() => setPeriod("30", filters, setFilters)}>
-                  최근 30일
-                </button>
-              </div>
-            </div>
-            <label>
-              정렬
+          <label className="select-filter sort-label">
+            <span className="filter-title">
+              <ListFilter size={15} /> 정렬
+            </span>
+            <span className="select-shell">
               <select value={filters.sort} onChange={(event) => setFilters({ ...filters, sort: event.target.value as SortKey })}>
-                <option value="updatedDesc">최신순</option>
-                <option value="updatedAsc">오래된순</option>
+                <option value="updatedDesc">마지막 대화 최신순</option>
+                <option value="updatedAsc">마지막 대화 오래된순</option>
                 <option value="createdDesc">생성일순</option>
                 <option value="tokensDesc">토큰 많은순</option>
                 <option value="tokensAsc">토큰 적은순</option>
                 <option value="sizeDesc">파일 큰순</option>
                 <option value="sizeAsc">파일 작은순</option>
               </select>
-            </label>
-            <label>
-              표시
-              <select value={filters.limit} onChange={(event) => setFilters({ ...filters, limit: Number(event.target.value) })}>
-                <option value={100}>100개</option>
-                <option value={300}>300개</option>
-                <option value={500}>500개</option>
-                <option value={1000}>1000개</option>
-                <option value={2000}>2000개</option>
-              </select>
-            </label>
-            <button className="secondary-button inline" onClick={() => setFilters(defaultFilters)}>
-              <RotateCcw size={16} /> 초기화
+            </span>
+          </label>
+        </div>
+
+        <div className="view-row">
+          <div className="view-tabs" role="tablist" aria-label="세션 상태">
+            <button
+              aria-label="전체 보기"
+              className={currentView === "all" ? "selected" : ""}
+              onClick={() => setView("all", filters, setFilters)}
+            >
+              전체
+              <small>삭제 대기 포함</small>
             </button>
-            <details className="manual-date">
-              <summary>직접 날짜 지정</summary>
-              <div>
-                <label>
-                  시작일
-                  <input type="date" value={filters.from} onChange={(event) => setFilters({ ...filters, from: event.target.value })} />
-                </label>
-                <label>
-                  종료일
-                  <input type="date" value={filters.to} onChange={(event) => setFilters({ ...filters, to: event.target.value })} />
-                </label>
-              </div>
-            </details>
-            <DoctorPanel doctor={doctor} compact />
+            <button
+              aria-label="활성 보기"
+              className={currentView === "active" ? "selected" : ""}
+              onClick={() => setView("active", filters, setFilters)}
+            >
+              활성
+              <small>정리 전 기본 목록</small>
+            </button>
+            <button
+              aria-label="삭제 대기 보기"
+              className={currentView === "trash" ? "selected" : ""}
+              onClick={() => setView("trash", filters, setFilters)}
+            >
+              삭제 대기
+              <small>복구 또는 삭제</small>
+            </button>
           </div>
-        )}
+          <button className="primary-button refresh-button" onClick={() => void refreshAll()} disabled={loading} aria-label="세션 목록 새로고침">
+            <RefreshCw className={loading ? "loading-icon" : ""} size={18} /> 새로고침
+          </button>
+        </div>
+
+        <div className="delete-help">
+          <strong>삭제 방식</strong>
+          <span>삭제 대기는 되돌릴 수 있고, 삭제는 선택한 AI의 실제 기록 파일까지 제거합니다.</span>
+        </div>
       </section>
 
       {notice && (
-        <div className="notice" role="status">
-          {notice}
+        <div className="toast-region" aria-live="polite">
+          <div className="toast" role="status">
+            <span>{notice}</span>
+            <button className="toast-close" onClick={() => setNotice("")} aria-label="알림 닫기">
+              <X size={15} />
+            </button>
+          </div>
         </div>
       )}
       {operation && <OperationBanner operation={operation} />}
 
-      <section className={`workspace ${detail ? "with-detail" : ""}`}>
+      <section className={`workspace ${activeId ? "with-detail" : ""}`}>
         <section className="session-panel" aria-label="세션 목록">
           <div className="table-toolbar">
             <div>
               <strong>{sessions.length.toLocaleString("ko-KR")}개 표시</strong>
-              <span>{filters.search ? `"${filters.search}" 검색 결과` : "최근 대화 기준"}</span>
+              <span>{filters.search ? `"${filters.search}" 검색 결과` : sortLabel[filters.sort]}</span>
             </div>
             <button
               className="icon-button"
@@ -453,15 +509,20 @@ function App() {
           </div>
         </section>
 
-        {detail && (
+        {activeId && (
           <DetailPanel
             detail={detail}
+            isLoading={detailLoading}
+            error={detailError}
             busy={busy}
+            isSummarizing={detail ? summarizingSessionId === detail.session.id : false}
             onClose={() => {
               setActiveId(null);
               setDetail(null);
+              setDetailError("");
+              setDetailLoading(false);
             }}
-            onSummarize={(id) => void runBulk("요약", () => api.summary(id))}
+            onSummarize={(id) => void runBulk("요약", () => api.summary(id), { sessionId: id })}
             onMoveToTrash={(id) =>
               void runBulk("삭제 대기 이동", (onProgress) => postSessionIds("/api/trash", [id], onProgress), {
                 preserveSelection: currentView === "all",
@@ -511,7 +572,7 @@ function OperationBanner({ operation }: { operation: OperationState }) {
 function getOperationMessage(operation: OperationState): string {
   const progress = formatOperationProgress(operation);
   const suffix = progress ? `${progress} ` : "";
-  if (operation.label === "삭제") return `${suffix}실제 Codex 기록을 삭제하고 있습니다. 큰 세션이나 여러 개는 시간이 걸릴 수 있습니다.`;
+  if (operation.label === "삭제") return `${suffix}실제 AI 기록 파일을 삭제하고 있습니다. 큰 세션이나 여러 개는 시간이 걸릴 수 있습니다.`;
   if (operation.label === "삭제 대기 이동") return `${suffix}선택한 세션을 삭제 대기로 이동하고 있습니다.`;
   if (operation.label === "복구") return `${suffix}선택한 세션을 복구하고 있습니다.`;
   if (operation.label === "요약") return "세션 내용을 읽고 요약을 생성하고 있습니다.";
@@ -522,73 +583,6 @@ function formatOperationProgress(operation: OperationState): string {
   if (operation.total === null) return "";
   if (operation.total <= 1) return "처리 중";
   return `${operation.done.toLocaleString("ko-KR")} / ${operation.total.toLocaleString("ko-KR")}개 처리`;
-}
-
-function DoctorPanel({ doctor, compact = false }: { doctor: DoctorResponse | null; compact?: boolean }) {
-  return (
-    <div className={`doctor ${compact ? "compact" : ""}`}>
-      <div className="panel-heading">
-        <ShieldAlert size={18} />
-        <h2>정합성 진단</h2>
-      </div>
-      <p className="doctor-note">Codex 목록 기록과 실제 대화 파일이 서로 맞는지 확인한 결과입니다. 자동으로 삭제되지는 않습니다.</p>
-      {!doctor && <p className="muted">진단 대기 중</p>}
-      {doctor?.issues.map((issue) => {
-        const copy = getDoctorCopy(issue);
-        return (
-          <div key={`${issue.title}-${issue.detail}`} className={`doctor-issue ${issue.level}`}>
-            <strong>{copy.title}</strong>
-            <p>{copy.short}</p>
-            <details className="doctor-more">
-              <summary>자세히</summary>
-              <p>{copy.detail}</p>
-            </details>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function getDoctorCopy(issue: DoctorIssue): { title: string; short: string; detail: string } {
-  if (issue.title.includes("목록에는 있으나 대화 파일이 없는 세션")) {
-    return {
-      title: "목록만 남고 대화 파일이 없는 세션",
-      short: countPrefix(issue.detail, "개") + " 목록에는 있지만 대화 파일이 없어 상세/요약이 안 될 수 있습니다.",
-      detail: "Codex가 세션 목록에는 이 기록을 알고 있는데, 실제 대화가 저장된 rollout JSONL 파일은 못 찾은 상태입니다. 필요 없는 항목이면 삭제 대기로 보내거나 삭제로 목록 흔적까지 정리합니다."
-    };
-  }
-  if (issue.title.includes("대화 파일은 있으나 목록에는 없는 세션")) {
-    return {
-      title: "대화 파일만 남고 목록에는 없는 세션",
-      short: countPrefix(issue.detail, "개") + " 목록에는 안 보이지만 파일만 남아 용량을 차지할 수 있습니다.",
-      detail: "실제 대화 파일은 디스크에 남아 있는데 Codex 목록 기록과 연결되지 않은 상태입니다. 아직 앱에서 직접 정리하지 않고, 필요한 파일인지 확인한 뒤 고아 파일 정리 대상으로 다루는 편이 안전합니다."
-    };
-  }
-  if (issue.title.includes("정합성 양호")) {
-    return {
-      title: "문제 없음",
-      short: "목록 기록과 대화 파일 연결에 눈에 띄는 문제가 없습니다.",
-      detail: "별도 조치 없이 사용하면 됩니다."
-    };
-  }
-  if (issue.title.includes("삭제 대기")) {
-    return {
-      title: "삭제 대기 중인 세션",
-      short: countPrefix(issue.detail, "개") + " 아직 실제 삭제된 것은 아니며 복구할 수 있습니다.",
-      detail: "삭제 대기 탭에서 복구하거나, 실제로 지울 항목만 선택해서 삭제하면 됩니다."
-    };
-  }
-  return {
-    title: issue.title,
-    short: issue.detail,
-    detail: "내용을 확인한 뒤 필요할 때만 삭제 대기 또는 삭제를 실행합니다."
-  };
-}
-
-function countPrefix(text: string, suffix: string): string {
-  const match = text.match(/(\d+)\s*개/);
-  return match ? `${Number(match[1]).toLocaleString("ko-KR")}${suffix}` : "";
 }
 
 function SessionRow({
@@ -611,7 +605,10 @@ function SessionRow({
       </td>
       <td>
         <button className="title-button" onClick={onOpen}>
-          <span>{session.title}</span>
+          <span className="title-line">
+            <SourceBadge source={session.source} />
+            <span className="title-text">{session.title}</span>
+          </span>
           <small>{session.lastUserMessage || session.firstUserMessage || session.id}</small>
         </button>
       </td>
@@ -619,8 +616,8 @@ function SessionRow({
         {shortPath(session.cwd)}
       </td>
       <td className="date-cell">{formatDate(session.updatedAt)}</td>
-      <td className="number-cell">
-        <MetricValue value={session.tokensUsed.toLocaleString("ko-KR")} />
+      <td className="number-cell token-cell" title={formatTokenTitle(session.tokensUsed)}>
+        <MetricValue {...formatTokenParts(session.tokensUsed)} />
       </td>
       <td className="number-cell">
         <MetricValue {...formatBytesParts(session.fileSize)} />
@@ -630,6 +627,10 @@ function SessionRow({
       </td>
     </tr>
   );
+}
+
+function SourceBadge({ source }: { source: SessionSource }) {
+  return <span className={`source-badge ${source}`}>{sourceLabel[source]}</span>;
 }
 
 function SortHeader({
@@ -685,7 +686,10 @@ function StatusPills({ session }: { session: SessionSummaryRow }) {
 
 function DetailPanel({
   detail,
+  isLoading,
+  error,
   busy,
+  isSummarizing,
   onClose,
   onSummarize,
   onMoveToTrash,
@@ -693,14 +697,23 @@ function DetailPanel({
   onDelete
 }: {
   detail: SessionDetailResponse | null;
+  isLoading: boolean;
+  error: string;
   busy: string | null;
+  isSummarizing: boolean;
   onClose: () => void;
   onSummarize: (id: string) => void;
   onMoveToTrash: (id: string) => void;
   onRestore: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
-  const isSummarizing = busy === "요약";
+  const [showAllMessages, setShowAllMessages] = useState(false);
+  useEffect(() => {
+    setShowAllMessages(false);
+  }, [detail?.session.id]);
+  const visibleItems = detail && !showAllMessages ? detail.items.slice(-80) : detail?.items ?? [];
+  const hiddenMessageCount = detail ? detail.items.length - visibleItems.length : 0;
+
   return (
     <aside className="detail-panel" aria-label="세션 상세">
       <div className="panel-heading">
@@ -710,11 +723,22 @@ function DetailPanel({
           <X size={17} />
         </button>
       </div>
-      {!detail && <p className="empty">목록에서 세션을 선택하면 대화와 요약을 확인할 수 있습니다.</p>}
+      {!detail && (
+        error ? (
+          <p className="detail-error">상세를 불러오지 못했습니다: {error}</p>
+        ) : (
+          <p className="empty">
+            {isLoading ? "세션 상세를 불러오는 중입니다." : "목록에서 세션을 선택하면 대화와 요약을 확인할 수 있습니다."}
+          </p>
+        )
+      )}
       {detail && (
         <>
           <div className="detail-head">
-            <strong>{detail.session.title}</strong>
+            <strong>
+              <SourceBadge source={detail.session.source} />
+              {detail.session.title}
+            </strong>
             <span>{detail.rawLineCount.toLocaleString("ko-KR")} lines · {formatBytes(detail.session.fileSize)}</span>
           </div>
           <div className="detail-actions">
@@ -749,12 +773,25 @@ function DetailPanel({
           </p>
           <SummaryView summary={detail.session.summary} isLoading={isSummarizing} />
           <div className="meta-list">
+            <span>도구 {sourceLabel[detail.session.source]}</span>
             <span>생성 {formatDate(detail.session.createdAt)}</span>
             <span>모델 {detail.session.model || "unknown"}</span>
             <span title={detail.session.rolloutPath}>{shortPath(detail.session.rolloutPath)}</span>
           </div>
           <div className="messages">
-            {detail.items.slice(-80).map((item) => (
+            {hiddenMessageCount > 0 && (
+              <div className="message-window-note">
+                <span>최근 80개만 표시 중입니다. 전체 {detail.items.length.toLocaleString("ko-KR")}개 대화 항목이 있습니다.</span>
+                <button onClick={() => setShowAllMessages(true)}>전체 보기</button>
+              </div>
+            )}
+            {showAllMessages && detail.items.length > 80 && (
+              <div className="message-window-note">
+                <span>전체 대화 항목을 표시 중입니다.</span>
+                <button onClick={() => setShowAllMessages(false)}>최근만 보기</button>
+              </div>
+            )}
+            {visibleItems.map((item) => (
               <MessageItem key={item.id} item={item} />
             ))}
           </div>
@@ -772,7 +809,7 @@ function SummaryView({ summary, isLoading }: { summary: string | null; isLoading
           <RefreshCw className="loading-icon" size={18} />
           <div>
             <strong>요약 생성 중</strong>
-            <span>Codex CLI가 세션 내용을 읽고 있습니다. 큰 세션은 조금 걸릴 수 있습니다.</span>
+            <span>요약 AI가 세션 내용을 읽고 있습니다. 큰 세션은 조금 걸릴 수 있습니다.</span>
           </div>
         </div>
       </section>
@@ -851,37 +888,6 @@ function setView(
   setFilters(next);
 }
 
-function setPeriod(
-  period: "all" | "7" | "30",
-  filters: FilterState,
-  setFilters: React.Dispatch<React.SetStateAction<FilterState>>
-) {
-  if (period === "all") {
-    setFilters({ ...filters, from: "", to: "" });
-    return;
-  }
-  const days = Number(period);
-  const end = new Date();
-  const start = new Date();
-  start.setDate(end.getDate() - (days - 1));
-  setFilters({ ...filters, from: toDateInput(start), to: toDateInput(end) });
-}
-
-function isPeriod(filters: FilterState, days: number): boolean {
-  if (!filters.from || !filters.to) return false;
-  const end = new Date();
-  const start = new Date();
-  start.setDate(end.getDate() - (days - 1));
-  return filters.from === toDateInput(start) && filters.to === toDateInput(end);
-}
-
-function toDateInput(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 function toggleSelected(id: string, setSelected: React.Dispatch<React.SetStateAction<Set<string>>>) {
   setSelected((prev) => {
     const next = new Set(prev);
@@ -918,6 +924,25 @@ function formatBytesParts(value: number): { value: string; unit: string } {
   return { value: (value / 1024 / 1024).toFixed(1), unit: "MB" };
 }
 
+function formatTokenParts(value: number): { value: string; unit?: string } {
+  if (value <= 0) return { value: "-" };
+  if (value >= 1_000_000_000) return { value: trimDecimal(value / 1_000_000_000), unit: "B" };
+  if (value >= 1_000_000) return { value: trimDecimal(value / 1_000_000), unit: "M" };
+  if (value < 100_000) return { value: value.toLocaleString("ko-KR") };
+  if (value >= 10_000) return { value: trimDecimal(value / 1_000), unit: "K" };
+  if (value >= 1_000) return { value: trimDecimal(value / 1_000), unit: "K" };
+  return { value: value.toLocaleString("ko-KR") };
+}
+
+function formatTokenTitle(value: number): string {
+  if (value <= 0) return "원문에 토큰 정보가 없습니다.";
+  return `${value.toLocaleString("ko-KR")} 토큰`;
+}
+
+function trimDecimal(value: number): string {
+  return value.toFixed(1).replace(/\.0$/, "");
+}
+
 function shortPath(value: string): string {
   return value.replace(/^\/Users\/[^/]+/, "~");
 }
@@ -931,4 +956,7 @@ function formatResult(label: string, result: unknown): string {
   return `${label} 완료: ${done}개 처리${skipped ? `, ${skipped}개 건너뜀` : ""}${reason ? ` · ${reason}` : ""}`;
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+const rootElement = document.getElementById("root");
+if (!rootElement) throw new Error("Root element not found.");
+window.__codexSessionManagerRoot ??= createRoot(rootElement);
+window.__codexSessionManagerRoot.render(<App />);

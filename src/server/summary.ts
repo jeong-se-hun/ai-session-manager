@@ -20,10 +20,19 @@ export async function generateSessionSummary(sessionId: string): Promise<string>
 }
 
 function buildFallbackSummary(items: DetailItem[], fallbackText: string): string {
-  const lastConversation = [...items]
-    .reverse()
-    .find((item) => (item.kind === "user" || item.kind === "assistant") && isMeaningfulText(item.text));
-  return compact(lastConversation?.text || fallbackText || "최근 대화를 찾지 못했습니다.", 320);
+  const conversation = items.filter(
+    (item) => (item.kind === "user" || item.kind === "assistant") && isMeaningfulText(item.text) && !isTechnicalContext(item.text)
+  );
+  const firstUser = conversation.find((item) => item.kind === "user")?.text;
+  const middle = conversation[Math.floor(conversation.length / 2)]?.text;
+  const lastMeaningful = [...conversation].reverse().find((item) => isMeaningfulText(item.text))?.text;
+  const parts = [firstUser, middle, lastMeaningful]
+    .filter((part): part is string => Boolean(part))
+    .map((part) => compact(part, 140));
+  if (parts.length >= 2) {
+    return compact(`이 세션은 ${parts[0]}에서 시작해, 진행 중 ${parts[1]} 흐름을 거쳤고, 마지막에는 ${parts.at(-1)} 상태로 마무리되었습니다.`, 420);
+  }
+  return compact(parts[0] || fallbackText || "최근 대화를 찾지 못했습니다.", 320);
 }
 
 async function generateAiSummary(items: DetailItem[], fallback: string): Promise<string> {
@@ -61,7 +70,7 @@ function buildAiPrompt(items: DetailItem[], fallback: string): string {
     .join("\n\n");
 
   return [
-    "너는 Codex 세션 관리 앱의 요약 생성기다.",
+    "너는 AI 세션 관리 앱의 요약 생성기다.",
     "아래 대화 내용을 읽고 한국어 세션 요약 하나만 작성해라.",
     "최근 대화에 치우치지 말고 전체 세션의 목적, 중간 변경사항, 마지막 상태를 균형 있게 반영해라.",
     "아래 대화는 전체 세션에서 초반/중반/후반을 고르게 뽑은 것이다.",
@@ -225,7 +234,18 @@ function isProgressMessage(value: string): boolean {
 
 function isTechnicalContext(value: string): boolean {
   const clean = value.trim();
-  return clean.startsWith("<environment_context>") || clean.startsWith("<turn_aborted>") || clean.startsWith("<developer_context>");
+  return (
+    clean.startsWith("<environment_context>") ||
+    clean.startsWith("<turn_aborted>") ||
+    clean.startsWith("<developer_context>") ||
+    clean.startsWith("<permissions instructions>") ||
+    clean.startsWith("<skills_instructions>") ||
+    clean.startsWith("<apps_instructions>") ||
+    clean.startsWith("<plugins_instructions>") ||
+    clean.startsWith("# AGENTS.md instructions") ||
+    clean.includes("Knowledge cutoff:") ||
+    clean.includes("Current date:")
+  );
 }
 
 function extractKeywords(input: string): string[] {

@@ -5,6 +5,8 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const originalCodexHome = process.env.CODEX_HOME;
+const originalClaudeHome = process.env.CLAUDE_HOME;
+const originalGeminiHome = process.env.GEMINI_HOME;
 const originalAppHome = process.env.CODEX_SESSION_MANAGER_HOME;
 const originalCodexCliPath = process.env.CODEX_CLI_PATH;
 const originalCodexSummaryTimeout = process.env.CODEX_SUMMARY_TIMEOUT_MS;
@@ -13,6 +15,10 @@ afterEach(() => {
   vi.resetModules();
   if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = originalCodexHome;
+  if (originalClaudeHome === undefined) delete process.env.CLAUDE_HOME;
+  else process.env.CLAUDE_HOME = originalClaudeHome;
+  if (originalGeminiHome === undefined) delete process.env.GEMINI_HOME;
+  else process.env.GEMINI_HOME = originalGeminiHome;
   if (originalAppHome === undefined) delete process.env.CODEX_SESSION_MANAGER_HOME;
   else process.env.CODEX_SESSION_MANAGER_HOME = originalAppHome;
   if (originalCodexCliPath === undefined) delete process.env.CODEX_CLI_PATH;
@@ -26,6 +32,8 @@ describe("session operations", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
     const app = fs.mkdtempSync(path.join(os.tmpdir(), "codex-app-"));
     process.env.CODEX_HOME = root;
+    process.env.CLAUDE_HOME = path.join(root, "claude");
+    process.env.GEMINI_HOME = path.join(root, "gemini");
     process.env.CODEX_SESSION_MANAGER_HOME = app;
     vi.resetModules();
 
@@ -51,6 +59,8 @@ describe("session operations", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
     const app = fs.mkdtempSync(path.join(os.tmpdir(), "codex-app-"));
     process.env.CODEX_HOME = root;
+    process.env.CLAUDE_HOME = path.join(root, "claude");
+    process.env.GEMINI_HOME = path.join(root, "gemini");
     process.env.CODEX_SESSION_MANAGER_HOME = app;
     vi.resetModules();
 
@@ -202,6 +212,183 @@ describe("session operations", () => {
     expect(fileContains(path.join(backupDir, "logs_2.sqlite"), sessionId)).toBe(false);
     expect(fileContains(path.join(backupDir, "logs_2.sqlite"), directSessionId)).toBe(false);
   });
+
+  it("lists and deletes Claude and Gemini session files inside their own roots", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "multi-ai-home-"));
+    const app = fs.mkdtempSync(path.join(os.tmpdir(), "multi-ai-app-"));
+    const claudeHome = path.join(root, "claude");
+    const geminiHome = path.join(root, "gemini");
+    process.env.CODEX_HOME = path.join(root, "codex");
+    process.env.CLAUDE_HOME = claudeHome;
+    process.env.GEMINI_HOME = geminiHome;
+    process.env.CODEX_SESSION_MANAGER_HOME = app;
+    vi.resetModules();
+
+    const claudeDir = path.join(claudeHome, "transcripts");
+    const claudePath = path.join(claudeDir, "ses_fixture.jsonl");
+    fs.mkdirSync(claudeDir, { recursive: true });
+    const claudeHeadFiller = Array.from({ length: 1600 }, (_, index) =>
+      JSON.stringify({ type: "system", timestamp: "2026-01-01T00:00:00.000Z", content: `head-${index}-${"x".repeat(500)}` })
+    );
+    const claudeTailFiller = Array.from({ length: 2000 }, (_, index) =>
+      JSON.stringify({ type: "system", timestamp: "2026-01-01T00:00:02.000Z", content: `tail-${index}-${"x".repeat(500)}` })
+    );
+    fs.writeFileSync(
+      claudePath,
+      [
+        JSON.stringify({ type: "user", timestamp: "2026-01-01T00:00:00.000Z", content: "Claude 정리 테스트" }),
+        ...claudeHeadFiller,
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-01-01T00:00:01.000Z",
+          content: "완료",
+          usage: { input_tokens: 10, output_tokens: 5 }
+        }),
+        ...claudeTailFiller
+      ].join("\n"),
+      "utf8"
+    );
+
+    const claudeProjectDir = path.join(claudeHome, "projects", "-tmp-project");
+    const claudeProjectPath = path.join(claudeProjectDir, "c-project.jsonl");
+    const claudeSubagentDir = path.join(claudeProjectDir, "c-project", "subagents");
+    const claudeSubagentPath = path.join(claudeSubagentDir, "agent-a1.jsonl");
+    fs.mkdirSync(claudeProjectDir, { recursive: true });
+    fs.mkdirSync(claudeSubagentDir, { recursive: true });
+    fs.writeFileSync(
+      claudeProjectPath,
+      [
+        JSON.stringify({ type: "permission-mode", sessionId: "c-project" }),
+        JSON.stringify({
+          type: "user",
+          timestamp: "2026-01-03T00:00:00.000Z",
+          cwd: "/tmp/project",
+          sessionId: "c-project",
+          message: { role: "user", content: "Claude 프로젝트 최신 테스트" }
+        }),
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-01-03T00:00:01.000Z",
+          cwd: "/tmp/project",
+          sessionId: "c-project",
+          requestId: "req-project-1",
+          message: {
+            id: "msg-project-1",
+            role: "assistant",
+            content: [{ type: "text", text: "완료" }],
+            usage: { input_tokens: 11, cache_creation_input_tokens: 3, cache_read_input_tokens: 4, output_tokens: 7 }
+          }
+        }),
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-01-03T00:00:02.000Z",
+          cwd: "/tmp/project",
+          sessionId: "c-project",
+          requestId: "req-project-1",
+          message: {
+            id: "msg-project-1",
+            role: "assistant",
+            content: [{ type: "tool_use", name: "Read", input: {} }],
+            usage: { input_tokens: 11, cache_creation_input_tokens: 3, cache_read_input_tokens: 4, output_tokens: 7 }
+          }
+        })
+      ].join("\n"),
+      "utf8"
+    );
+    fs.writeFileSync(
+      claudeSubagentPath,
+      [
+        JSON.stringify({
+          type: "user",
+          timestamp: "2026-01-03T00:00:02.000Z",
+          cwd: "/tmp/project",
+          message: { role: "user", content: "Claude 하위 작업 로그" }
+        })
+      ].join("\n"),
+      "utf8"
+    );
+
+    const geminiProjectRoot = path.join(root, "project");
+    const geminiMarkerDir = path.join(geminiHome, "history", "proj");
+    const geminiChatDir = path.join(geminiHome, "tmp", "proj", "chats");
+    const geminiPath = path.join(geminiChatDir, "session-fixture.json");
+    fs.mkdirSync(geminiMarkerDir, { recursive: true });
+    fs.mkdirSync(geminiChatDir, { recursive: true });
+    fs.writeFileSync(path.join(geminiMarkerDir, ".project_root"), geminiProjectRoot, "utf8");
+    fs.writeFileSync(
+      geminiPath,
+      JSON.stringify({
+        sessionId: "g-session",
+        startTime: "2026-01-02T00:00:00.000Z",
+        lastUpdated: "2026-01-02T00:00:01.000Z",
+        messages: [
+          { type: "user", timestamp: "2026-01-02T00:00:00.000Z", content: [{ text: "Gemini 정리 테스트" }] },
+          {
+            type: "gemini",
+            timestamp: "2026-01-02T00:00:01.000Z",
+            content: "완료",
+            model: "gemini-test",
+            tokens: { total: 123 }
+          },
+          {
+            type: "gemini",
+            timestamp: "2026-01-02T00:00:02.000Z",
+            content: "추가 완료",
+            model: "gemini-test",
+            tokens: { input: 10, output: 7 }
+          }
+        ],
+        kind: "main"
+      }),
+      "utf8"
+    );
+
+    const { getSessionDetail, listSessions } = await import("./scanner");
+    const { getAppDb, getTrashMap } = await import("./appDb");
+    const { trashSessions, permanentlyDeleteSessions } = await import("./operations");
+    const initial = await listSessions({ source: "all", trash: "all", archive: "all" });
+    expect(initial.totals.sources.claude.all).toBe(2);
+    expect(initial.totals.sources.gemini.all).toBe(1);
+    expect(initial.sessions.find((session) => session.id === "claude:ses_fixture")?.firstUserMessage).toContain("Claude 정리");
+    expect(initial.sessions.find((session) => session.id === "claude:project:-tmp-project:c-project")?.firstUserMessage).toContain(
+      "Claude 프로젝트"
+    );
+    expect(initial.sessions.find((session) => session.id === "claude:project:-tmp-project:c-project")?.fileSize).toBeGreaterThan(
+      fs.statSync(claudeProjectPath).size
+    );
+    expect(initial.sessions.find((session) => session.id === "claude:ses_fixture")?.tokensUsed).toBe(15);
+    expect(initial.sessions.find((session) => session.id === "claude:project:-tmp-project:c-project")?.tokensUsed).toBe(25);
+    expect(initial.sessions.find((session) => session.id === "gemini:proj:chats:session-fixture")?.cwd).toBe(geminiProjectRoot);
+    expect(initial.sessions.find((session) => session.id === "gemini:proj:chats:session-fixture")?.tokensUsed).toBe(140);
+    await expect(getSessionDetail("claude:project:-tmp-project:c-project")).resolves.toMatchObject({
+      session: { id: "claude:project:-tmp-project:c-project", source: "claude" },
+      rawLineCount: 4
+    });
+
+    expect(await trashSessions(["claude:ses_fixture", "claude:project:-tmp-project:c-project", "gemini:proj:chats:session-fixture"])).toMatchObject([
+      { sessionId: "claude:ses_fixture", status: "trashed" },
+      { sessionId: "claude:project:-tmp-project:c-project", status: "trashed" },
+      { sessionId: "gemini:proj:chats:session-fixture", status: "trashed" }
+    ]);
+    expect(fs.existsSync(claudePath)).toBe(true);
+    expect(fs.existsSync(claudeProjectPath)).toBe(true);
+    expect(fs.existsSync(claudeSubagentPath)).toBe(true);
+    expect(fs.existsSync(geminiPath)).toBe(true);
+    expect(getTrashMap().size).toBe(3);
+
+    expect(await permanentlyDeleteSessions(["claude:ses_fixture", "claude:project:-tmp-project:c-project", "gemini:proj:chats:session-fixture"])).toMatchObject([
+      { sessionId: "claude:ses_fixture", status: "deleted" },
+      { sessionId: "claude:project:-tmp-project:c-project", status: "deleted" },
+      { sessionId: "gemini:proj:chats:session-fixture", status: "deleted" }
+    ]);
+    expect(fs.existsSync(claudePath)).toBe(false);
+    expect(fs.existsSync(claudeProjectPath)).toBe(false);
+    expect(fs.existsSync(claudeSubagentPath)).toBe(false);
+    expect(fs.existsSync(path.dirname(claudeSubagentDir))).toBe(false);
+    expect(fs.existsSync(geminiPath)).toBe(false);
+    expect(getTrashMap().size).toBe(0);
+    expect(getAppDb().prepare("SELECT count(*) AS count FROM trash_items").get()).toEqual({ count: 0 });
+  });
 });
 
 describe("session summary generation", () => {
@@ -247,6 +434,8 @@ describe("session summary generation", () => {
     fs.chmodSync(fakeCodex, 0o755);
 
     process.env.CODEX_HOME = root;
+    process.env.CLAUDE_HOME = path.join(root, "claude");
+    process.env.GEMINI_HOME = path.join(root, "gemini");
     process.env.CODEX_SESSION_MANAGER_HOME = app;
     process.env.CODEX_CLI_PATH = fakeCodex;
     process.env.CODEX_SUMMARY_TIMEOUT_MS = "2000";
@@ -256,7 +445,7 @@ describe("session summary generation", () => {
     await expect(summaryModule.generateSessionSummary(sessionId)).resolves.toContain("전체 사용 흐름");
   });
 
-  it("uses Codex CLI output and falls back to only the latest conversation when CLI is unavailable", async () => {
+  it("uses Codex CLI output and falls back to a whole-session summary when CLI is unavailable", async () => {
     const successRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-home-"));
     const successApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-app-"));
     const successSessionId = "summary-thread-1";
@@ -283,6 +472,8 @@ describe("session summary generation", () => {
     fs.chmodSync(fakeCodex, 0o755);
 
     process.env.CODEX_HOME = successRoot;
+    process.env.CLAUDE_HOME = path.join(successRoot, "claude");
+    process.env.GEMINI_HOME = path.join(successRoot, "gemini");
     process.env.CODEX_SESSION_MANAGER_HOME = successApp;
     process.env.CODEX_CLI_PATH = fakeCodex;
     process.env.CODEX_SUMMARY_TIMEOUT_MS = "2000";
@@ -299,13 +490,17 @@ describe("session summary generation", () => {
     createSummaryFixture(fallbackRoot, fallbackSessionId, "요약 실패 테스트입니다.", "AI가 실패하면 이 마지막 대화만 보입니다.");
 
     process.env.CODEX_HOME = fallbackRoot;
+    process.env.CLAUDE_HOME = path.join(fallbackRoot, "claude");
+    process.env.GEMINI_HOME = path.join(fallbackRoot, "gemini");
     process.env.CODEX_SESSION_MANAGER_HOME = fallbackApp;
     process.env.CODEX_CLI_PATH = "/bin/false";
     process.env.CODEX_SUMMARY_TIMEOUT_MS = "2000";
     vi.resetModules();
 
     const fallbackSummaryModule = await import("./summary");
-    await expect(fallbackSummaryModule.generateSessionSummary(fallbackSessionId)).resolves.toBe("AI가 실패하면 이 마지막 대화만 보입니다.");
+    const fallbackSummary = await fallbackSummaryModule.generateSessionSummary(fallbackSessionId);
+    expect(fallbackSummary).toContain("요약 실패 테스트입니다.");
+    expect(fallbackSummary).toContain("AI가 실패하면 이 마지막 대화만 보입니다.");
   });
 });
 

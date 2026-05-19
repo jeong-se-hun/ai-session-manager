@@ -8,6 +8,8 @@ export function expandHome(input: string): string {
 }
 
 export const codexHome = path.resolve(expandHome(process.env.CODEX_HOME ?? "~/.codex"));
+export const claudeHome = path.resolve(expandHome(process.env.CLAUDE_HOME ?? "~/.claude"));
+export const geminiHome = path.resolve(expandHome(process.env.GEMINI_HOME ?? "~/.gemini"));
 export const appHome = path.resolve(expandHome(process.env.CODEX_SESSION_MANAGER_HOME ?? "~/.codex-session-manager"));
 
 export const stateDbPath = path.join(codexHome, "state_5.sqlite");
@@ -15,6 +17,10 @@ export const logsDbPath = path.join(codexHome, "logs_2.sqlite");
 export const historyPath = path.join(codexHome, "history.jsonl");
 export const sessionIndexPath = path.join(codexHome, "session_index.jsonl");
 export const sessionsRoot = path.join(codexHome, "sessions");
+export const claudeProjectsRoot = path.join(claudeHome, "projects");
+export const claudeTranscriptsRoot = path.join(claudeHome, "transcripts");
+export const geminiHistoryRoot = path.join(geminiHome, "history");
+export const geminiTmpRoot = path.join(geminiHome, "tmp");
 export const appDbPath = path.join(appHome, "app.sqlite");
 export const trashRoot = path.join(appHome, "trash");
 export const backupRoot = path.join(appHome, "backups");

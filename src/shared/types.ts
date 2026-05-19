@@ -11,8 +11,13 @@ export type ArchiveFilter = "all" | "active" | "archived";
 
 export type TrashFilter = "all" | "normal" | "trashed";
 
+export type SessionSource = "codex" | "claude" | "gemini";
+
+export type SourceFilter = "all" | SessionSource;
+
 export interface SessionFilters {
   search?: string;
+  source?: SourceFilter;
   cwd?: string;
   from?: string;
   to?: string;
@@ -27,7 +32,7 @@ export interface SessionSummaryRow {
   title: string;
   firstUserMessage: string;
   cwd: string;
-  source: string;
+  source: SessionSource;
   model: string | null;
   reasoningEffort: string | null;
   cliVersion: string;
@@ -54,7 +59,18 @@ export interface SessionListResponse {
     trashed: number;
     missingFiles: number;
     totalBytes: number;
+    sources: Record<
+      SessionSource,
+      {
+        all: number;
+        visible: number;
+        trashed: number;
+        totalBytes: number;
+      }
+    >;
     codexHome: string;
+    claudeHome: string;
+    geminiHome: string;
     appHome: string;
   };
   projects: string[];
@@ -99,5 +115,7 @@ export interface DoctorResponse {
     trashedItems: number;
     appDbPath: string;
     codexHome: string;
+    claudeHome: string;
+    geminiHome: string;
   };
 }
