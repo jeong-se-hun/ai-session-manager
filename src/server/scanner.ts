@@ -5,6 +5,7 @@ import { getSummaryMap, getTrashMap } from "./appDb";
 import { getStoragePaths } from "./config";
 import { readJsonl, truncateText } from "./jsonl";
 import { toIsoFromSeconds } from "./paths";
+import { isMeaningfulSessionText, pickDisplayTitle } from "./textQuality";
 import type {
   DetailItem,
   SessionDetailResponse,
@@ -177,6 +178,10 @@ async function listCodexSessions(
     const stat = safeStat(row.rollout_path);
     const trashRecord = trash.get(row.id);
     const fileMeta = stat ? await readCodexSessionMeta(row.rollout_path, stat) : null;
+    const rowFirstUserMessage = row.first_user_message && isMeaningfulSessionText(row.first_user_message) ? row.first_user_message : fileMeta?.firstUserMessage ?? "";
+    const historyMessage = history.get(row.id);
+    const lastUserMessage =
+      fileMeta?.lastUserMessage || (historyMessage && isMeaningfulSessionText(historyMessage) ? historyMessage : "");
     const tokenInfo = mergeTokenInfos(
       fileMeta?.tokenInfo,
       row.tokens_used > 0
@@ -190,8 +195,8 @@ async function listCodexSessions(
     );
     sessions.push(withTokenInfo({
       id: row.id,
-      title: row.title || row.first_user_message || row.id,
-      firstUserMessage: row.first_user_message || "",
+      title: pickDisplayTitle([row.title, rowFirstUserMessage, fileMeta?.firstUserMessage, lastUserMessage, fileMeta?.lastUserMessage], row.id),
+      firstUserMessage: rowFirstUserMessage,
       cwd: row.cwd,
       source: "codex",
       model: row.model,
@@ -204,7 +209,7 @@ async function listCodexSessions(
       rolloutPath: row.rollout_path,
       fileExists: Boolean(stat),
       fileSize: stat?.size ?? 0,
-      lastUserMessage: history.get(row.id) ?? fileMeta?.lastUserMessage ?? "",
+      lastUserMessage,
       trashed: Boolean(trashRecord),
       trashDeletedAt: trashRecord?.deleted_at ?? null,
       summary: summaries.get(row.id) ?? null
@@ -220,7 +225,7 @@ async function listCodexSessions(
     const trashRecord = trash.get(meta.id);
     sessions.push(withTokenInfo({
       id: meta.id,
-      title: meta.title,
+      title: pickDisplayTitle([meta.title, meta.firstUserMessage, meta.lastUserMessage], meta.id),
       firstUserMessage: meta.firstUserMessage,
       cwd: meta.cwd,
       source: "codex",
@@ -268,7 +273,7 @@ async function listClaudeSessions(
     const trashRecord = trash.get(id);
     sessions.push(withTokenInfo({
       id,
-      title: meta.title || nativeId,
+      title: pickDisplayTitle([meta.title, meta.firstUserMessage, meta.lastUserMessage], nativeId),
       firstUserMessage: meta.firstUserMessage,
       cwd: meta.cwd || inferClaudeProjectPath(filePath),
       source: "claude",
@@ -318,7 +323,7 @@ function listGeminiSessions(
     return [
       withTokenInfo({
         id,
-        title: meta.title || sessionId,
+        title: pickDisplayTitle([meta.title, meta.firstUserMessage, meta.lastUserMessage], sessionId),
         firstUserMessage: meta.firstUserMessage,
         cwd: projectRoots.get(projectKey) ?? path.join(geminiTmpRoot, projectKey),
         source: "gemini" as const,
@@ -499,7 +504,7 @@ async function readCodexSessionMeta(filePath: string, stat: fs.Stats): Promise<{
     );
 
     const userText = extractCodexUserText(value);
-    if (userText && !isTechnicalContextText(userText)) {
+    if (isMeaningfulSessionText(userText)) {
       if (!firstUserMessage) firstUserMessage = truncateText(userText, 240);
       lastUserMessage = truncateText(userText, 240);
     }
@@ -781,7 +786,7 @@ function readGeminiSessionMeta(
     });
     if (getGeminiMessageType(message) === "user") {
       const text = extractGeminiMessageText(message);
-      if (text) {
+      if (isMeaningfulSessionText(text)) {
         if (!firstUserMessage) firstUserMessage = truncateText(text, 240);
         lastUserMessage = truncateText(text, 240);
       }
@@ -1166,21 +1171,6 @@ function updateTimestampBounds(value: unknown, onTimestamp: (timestampMs: number
   if (Number.isFinite(parsed)) onTimestamp(parsed);
 }
 
-function isTechnicalContextText(value: string): boolean {
-  const clean = value.trim();
-  return (
-    clean.startsWith("<environment_context>") ||
-    clean.startsWith("<developer_context>") ||
-    clean.startsWith("<permissions instructions>") ||
-    clean.startsWith("<skills_instructions>") ||
-    clean.startsWith("<apps_instructions>") ||
-    clean.startsWith("<plugins_instructions>") ||
-    clean.startsWith("# AGENTS.md instructions") ||
-    clean.includes("Knowledge cutoff:") ||
-    clean.includes("Current date:")
-  );
-}
-
 function applyFilters(sessions: SessionSummaryRow[], filters: SessionFilters): SessionSummaryRow[] {
   const search = filters.search?.trim().toLowerCase();
   const from = filters.from ? new Date(`${filters.from}T00:00:00`).getTime() : null;
@@ -1298,7 +1288,7 @@ function getClaudeUsageKey(value: AnyPayload): string | null {
 
 function isUsefulClaudeUserText(text: string, value: AnyPayload): boolean {
   const clean = text.trim();
-  if (!clean) return false;
+  if (!isMeaningfulSessionText(clean)) return false;
   if (value.isMeta === true) return false;
   if (clean.startsWith("<local-command-caveat>")) return false;
   if (clean.startsWith("<command-name>")) return false;

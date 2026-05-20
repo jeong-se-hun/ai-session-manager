@@ -416,6 +416,163 @@ describe("session operations", () => {
 });
 
 describe("session summary generation", () => {
+  it("uses meaningful request text for noisy continued-session titles", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-title-home-"));
+    const app = fs.mkdtempSync(path.join(os.tmpdir(), "codex-title-app-"));
+    const sessionId = "title-quality-thread";
+    const noisyIntro =
+      "This session is being continued from a previous conversation that ran out of context. Summary: Primary Request and Intent: 오래된 요약입니다.";
+    const realRequest = "실제 요청: 토큰 신뢰도 개선하고 제목 정리해줘";
+    createSummaryFixture(root, sessionId, noisyIntro, "처리했습니다.", [
+      { role: "user", message: noisyIntro },
+      { role: "assistant", message: "이전 요약을 확인했습니다." },
+      { role: "user", message: realRequest },
+      { role: "assistant", message: "처리했습니다." }
+    ]);
+
+    process.env.CODEX_HOME = root;
+    process.env.CLAUDE_HOME = path.join(root, "claude");
+    process.env.GEMINI_HOME = path.join(root, "gemini");
+    process.env.CODEX_SESSION_MANAGER_HOME = app;
+    vi.resetModules();
+
+    const { listSessions } = await import("./scanner");
+    const list = await listSessions({ source: "codex", trash: "all", archive: "all" });
+    expect(list.sessions[0]).toMatchObject({
+      title: realRequest,
+      firstUserMessage: realRequest,
+      lastUserMessage: realRequest
+    });
+  });
+
+  it("falls back with concise whole-session text instead of raw technical blobs", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-home-"));
+    const app = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-app-"));
+    const sessionId = "fallback-title-thread";
+    createSummaryFixture(root, sessionId, "width: 133.5; height: 63; opacity: 1; border-width: 1px;", "완료", [
+      { role: "user", message: "width: 133.5; height: 63; opacity: 1; border-width: 1px;" },
+      { role: "user", message: "사원 선택 화면을 Figma 기준으로 다시 검토해줘" },
+      { role: "assistant", message: "Figma 기준 차이를 정리했습니다." }
+    ]);
+
+    process.env.CODEX_HOME = root;
+    process.env.CLAUDE_HOME = path.join(root, "claude");
+    process.env.GEMINI_HOME = path.join(root, "gemini");
+    process.env.CODEX_SESSION_MANAGER_HOME = app;
+    process.env.CODEX_CLI_PATH = "/bin/false";
+    process.env.CODEX_SUMMARY_TIMEOUT_MS = "2000";
+    vi.resetModules();
+
+    const { listSessions } = await import("./scanner");
+    const list = await listSessions({ source: "codex", trash: "all", archive: "all" });
+    expect(list.sessions[0]).toMatchObject({
+      title: "사원 선택 화면을 Figma 기준으로 다시 검토해줘",
+      firstUserMessage: "사원 선택 화면을 Figma 기준으로 다시 검토해줘"
+    });
+
+    const summaryModule = await import("./summary");
+    const fallbackSummary = await summaryModule.generateSessionSummary(sessionId);
+    expect(fallbackSummary).toContain("사원 선택 화면을 Figma 기준으로 다시 검토해줘");
+    expect(fallbackSummary).not.toContain("width: 133.5");
+  });
+
+  it("keeps fallback summaries readable for specs, progress replies, and final outcomes", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-spec-home-"));
+    const app = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-spec-app-"));
+    const sessionId = "spec-progress-thread";
+    createSummaryFixture(
+      root,
+      sessionId,
+      "마이페이지 api 관련 수정 할건데 우선 수정하지말고 핵심만 분석해줘 # API 명세서 v1.1 작성일 2026-05-19 paymentMethodNm 필드 추가 예약 상세 응답 변경",
+      "상세 모달 로딩 스켈레톤을 추가했고 paymentMethodNm 표시와 빌드 테스트까지 완료했습니다.",
+      [
+        {
+          role: "user",
+          message:
+            "마이페이지 api 관련 수정 할건데 우선 수정하지말고 핵심만 분석해줘 # API 명세서 v1.1 작성일 2026-05-19 paymentMethodNm 필드 추가 예약 상세 응답 변경"
+        },
+        { role: "assistant", message: "확인하겠습니다. 현재 적용 상태를 먼저 보겠습니다." },
+        { role: "user", message: "paymentMethodNm 필드 반영하고 상세 보기 로딩 처리도 개선해줘" },
+        { role: "assistant", message: "상세 모달 로딩 스켈레톤을 추가했고 paymentMethodNm 표시와 빌드 테스트까지 완료했습니다." }
+      ]
+    );
+
+    process.env.CODEX_HOME = root;
+    process.env.CLAUDE_HOME = path.join(root, "claude");
+    process.env.GEMINI_HOME = path.join(root, "gemini");
+    process.env.CODEX_SESSION_MANAGER_HOME = app;
+    process.env.CODEX_CLI_PATH = "/bin/false";
+    process.env.CODEX_SUMMARY_TIMEOUT_MS = "2000";
+    vi.resetModules();
+
+    const summaryModule = await import("./summary");
+    const fallbackSummary = await summaryModule.generateSessionSummary(sessionId);
+    expect(fallbackSummary).toContain("마이페이지 api 관련 수정");
+    expect(fallbackSummary).toContain("paymentMethodNm");
+    expect(fallbackSummary).toContain("상세 보기 로딩 처리");
+    expect(fallbackSummary).toContain("빌드 테스트");
+    expect(fallbackSummary).not.toContain("확인하겠습니다");
+  });
+
+  it("turns email and audit style sessions into understandable fallback summaries", async () => {
+    const mailRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-mail-home-"));
+    const mailApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-mail-app-"));
+    const mailSessionId = "mail-thread";
+    createSummaryFixture(
+      mailRoot,
+      mailSessionId,
+      "보낸사람: 이윤상 <khan@dowhat.io> Date: 2026년 5월 15일 Subject: [두왓 - XT] 홈페이지 및 부킹엔진 간 SSO 로그인 연동 문서 전달드립니다. To: 홍정우 안녕하세요. SSO 연동 문서를 전달드립니다.",
+      "SSO 로그인 연동 문서의 핵심 의미와 실제 영향 범위를 쉽게 정리했습니다.",
+      [
+        {
+          role: "user",
+          message:
+            "보낸사람: 이윤상 <khan@dowhat.io> Date: 2026년 5월 15일 Subject: [두왓 - XT] 홈페이지 및 부킹엔진 간 SSO 로그인 연동 문서 전달드립니다. To: 홍정우 안녕하세요. SSO 연동 문서를 전달드립니다."
+        },
+        { role: "user", message: "이거 이해가 안되 정리좀 해줘" },
+        { role: "assistant", message: "SSO 로그인 연동 문서의 핵심 의미와 실제 영향 범위를 쉽게 정리했습니다." }
+      ]
+    );
+
+    process.env.CODEX_HOME = mailRoot;
+    process.env.CLAUDE_HOME = path.join(mailRoot, "claude");
+    process.env.GEMINI_HOME = path.join(mailRoot, "gemini");
+    process.env.CODEX_SESSION_MANAGER_HOME = mailApp;
+    process.env.CODEX_CLI_PATH = "/bin/false";
+    process.env.CODEX_SUMMARY_TIMEOUT_MS = "2000";
+    vi.resetModules();
+
+    const mailSummaryModule = await import("./summary");
+    const mailSummary = await mailSummaryModule.generateSessionSummary(mailSessionId);
+    expect(mailSummary).toContain("메일 검토");
+    expect(mailSummary).toContain("SSO 로그인 연동");
+    expect(mailSummary).not.toContain("보낸사람");
+
+    const auditRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-audit-home-"));
+    const auditApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-audit-app-"));
+    const auditSessionId = "audit-thread";
+    createSummaryFixture(
+      auditRoot,
+      auditSessionId,
+      "You are auditing /Users/sehunjeong/Desktop/front/ai/codex-session-manager. Read-only task. Focus only on server scanning correctness across Codex, Claude, Gemini. Do not edit files.",
+      "스캔 누락과 ID 중복 위험, 날짜 정렬 위험을 파일 라인 기준으로 정리했습니다."
+    );
+
+    process.env.CODEX_HOME = auditRoot;
+    process.env.CLAUDE_HOME = path.join(auditRoot, "claude");
+    process.env.GEMINI_HOME = path.join(auditRoot, "gemini");
+    process.env.CODEX_SESSION_MANAGER_HOME = auditApp;
+    process.env.CODEX_CLI_PATH = "/bin/false";
+    process.env.CODEX_SUMMARY_TIMEOUT_MS = "2000";
+    vi.resetModules();
+
+    const auditSummaryModule = await import("./summary");
+    const auditSummary = await auditSummaryModule.generateSessionSummary(auditSessionId);
+    expect(auditSummary).toContain("읽기 전용 감사");
+    expect(auditSummary).toContain("server scanning correctness");
+    expect(auditSummary).not.toContain("You are auditing");
+  });
+
   it("passes early, middle, and late conversation samples to Codex CLI", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-home-"));
     const app = fs.mkdtempSync(path.join(os.tmpdir(), "codex-summary-app-"));
